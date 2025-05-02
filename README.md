@@ -10,6 +10,7 @@ SecureVault is a secure secrets management system similar to HashiCorp Vault, de
 - [Running the Server](#running-the-server)
 - [Using the Go Client](#using-the-go-client)
 - [Using the Java Client](#using-the-java-client)
+- [Using the Python Client](#using-the-python-client)
 - [Permission Scenarios Examples](#permission-scenarios-examples)
 - [Secret Versioning](#secret-versioning)
 - [Replication Setup](#replication-setup)
@@ -553,6 +554,214 @@ client.DeleteSecret(ctx, "api/keys", securevault.DeleteOptions{
 client.deleteSecret("api/keys", DeleteOptions.builder()
         .destroy(true)
         .build());
+```
+
+## Using the Python Client
+
+### Installation
+
+Using pip:
+
+```bash
+pip install securevault-client
+```
+
+Using pip with a specific version:
+
+```bash
+pip install securevault-client==0.1.0
+```
+
+From source:
+
+```bash
+git clone https://github.com/yourusername/securevault.git
+cd securevault/clients/python
+pip install -e .
+```
+
+### Basic Usage
+
+```python
+import asyncio
+from securevault import SecureVaultClient, WriteOptions, ReadOptions, DeleteOptions
+
+# Create a client
+client = SecureVaultClient(
+    url="https://vault.example.com:8200",
+    token="s.your-auth-token",
+    timeout=10,
+    max_retries=3
+)
+
+# Write a secret
+client.write_secret(
+    path="database/credentials",
+    data={
+        "username": "dbuser",
+        "password": "dbpass123",
+        "host": "db.example.com",
+        "port": 5432
+    }
+)
+
+# Read a secret
+secret = client.read_secret("database/credentials")
+print(f"Username: {secret.data['username']}")
+print(f"Password: {secret.data['password']}")
+
+# List secrets
+secrets = client.list_secrets("database")
+print("Available secrets:")
+for s in secrets:
+    print(f"- {s}")
+
+# Delete a secret
+client.delete_secret("database/credentials")
+
+# Using a context manager for automatic cleanup
+with SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token") as client:
+    client.write_secret("app/config", {"api_key": "my-api-key"})
+    secret = client.read_secret("app/config")
+    print(f"API Key: {secret.data['api_key']}")
+```
+
+### Async Support
+
+The Python client also provides asynchronous support:
+
+```python
+import asyncio
+from securevault import AsyncSecureVaultClient
+
+async def main():
+    # Create async client
+    async with AsyncSecureVaultClient(
+        url="https://vault.example.com:8200",
+        token="s.your-auth-token"
+    ) as client:
+        # Write a secret
+        await client.write_secret(
+            path="database/credentials",
+            data={"username": "dbuser", "password": "dbpass123"}
+        )
+        
+        # Read a secret
+        secret = await client.read_secret("database/credentials")
+        print(f"Username: {secret.data['username']}")
+        
+        # List secrets
+        secrets = await client.list_secrets("database")
+        print("Available secrets:", secrets)
+
+# Run the async function
+asyncio.run(main())
+```
+
+### Error Handling
+
+The Python client provides detailed error types for different failure scenarios:
+
+```python
+from securevault import (
+    SecureVaultClient,
+    SecureVaultConnectionError,
+    SecureVaultAuthenticationError,
+    SecureVaultForbiddenError,
+    SecureVaultNotFoundError
+)
+
+try:
+    client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
+    secret = client.read_secret("database/credentials")
+    # Process the secret
+except SecureVaultNotFoundError:
+    print("Secret not found")
+except SecureVaultAuthenticationError:
+    print("Authentication failed - check your token")
+except SecureVaultForbiddenError:
+    print("Permission denied - check your token's policy")
+except SecureVaultConnectionError as e:
+    print(f"Connection error: {e}")
+except Exception as e:
+    print(f"Unexpected error: {e}")
+```
+
+### Managing Policies with Python Client
+
+```python
+from securevault import SecureVaultClient, Policy, PolicyRule
+
+# Create a policy
+policy = Policy(
+    name="app-policy",
+    description="Policy for application access",
+    rules=[
+        PolicyRule(
+            path="secret/app/*",
+            capabilities=["read", "list"]
+        )
+    ]
+)
+
+client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
+client.create_policy(policy)
+
+# List policies
+policies = client.list_policies()
+for p in policies:
+    print(p)
+
+# Get a specific policy
+retrieved_policy = client.get_policy("app-policy")
+print(f"Policy name: {retrieved_policy.name}")
+print(f"Description: {retrieved_policy.description}")
+
+# Update a policy
+retrieved_policy.rules.append(
+    PolicyRule(
+        path="secret/app/logs/*",
+        capabilities=["read", "list"]
+    )
+)
+client.update_policy(retrieved_policy)
+
+# Delete a policy
+client.delete_policy("app-policy")
+```
+
+### Working with Secret Versions
+
+```python
+from securevault import SecureVaultClient, ReadOptions, DeleteOptions
+
+client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
+
+# Write multiple versions of a secret
+# Version 1
+client.write_secret("api/keys", {"api_key": "version1-key"})
+
+# Version 2
+client.write_secret("api/keys", {"api_key": "version2-key"})
+
+# Get latest version (2)
+latest = client.read_secret("api/keys")
+print(f"Latest key: {latest.data['api_key']}")
+
+# Get specific version (1)
+v1 = client.read_secret("api/keys", ReadOptions(version=1))
+print(f"Version 1 key: {v1.data['api_key']}")
+
+# Get metadata with version history
+metadata = client.get_secret_metadata("api/keys")
+print(f"Total versions: {len(metadata.versions)}")
+print(f"Current version: {metadata.current_version}")
+
+# Delete specific version
+client.delete_secret("api/keys", DeleteOptions(versions=[1]))
+
+# Permanently delete all versions
+client.delete_secret("api/keys", DeleteOptions(destroy=True))
 ```
 
 ## Replication Setup

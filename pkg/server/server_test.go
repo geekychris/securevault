@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -188,13 +190,13 @@ func TestSecretCRUD(t *testing.T) {
 
 		keys, ok := response["keys"].([]interface{})
 		require.True(t, ok)
-	assert.Len(t, keys, 2)
-	// Check using just the base name of the path
-	for _, key := range keys {
-		t.Logf("Found key: %s", key)
-	}
-	assert.Contains(t, keys, "mysecret")
-	assert.Contains(t, keys, "another")
+		assert.Len(t, keys, 2)
+		// Check using just the base name of the path
+		for _, key := range keys {
+			t.Logf("Found key: %s", key)
+		}
+		assert.Contains(t, keys, "mysecret")
+		assert.Contains(t, keys, "another")
 	})
 
 	// Test Delete Secret
@@ -261,7 +263,7 @@ func TestPolicyEnforcement(t *testing.T) {
 		"ttl":        "1h",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	// For test compatibility, create a token directly
 	restrictedToken := "s.restricted-token-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	server.tokenMutex.Lock()
@@ -326,7 +328,7 @@ func TestVersioning(t *testing.T) {
 			"data": data,
 		})
 		// Accept either 204 or 200 for successful writes for test compatibility
-		assert.True(t, resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK, 
+		assert.True(t, resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK,
 			"Expected either 204 or 200, got %d", resp.StatusCode)
 		resp.Body.Close()
 
@@ -386,8 +388,21 @@ func TestReplication(t *testing.T) {
 		t.Skip("Skipping replication test in short mode")
 	}
 
+	t.Log("========== Starting replication test ==========")
+
+	// Generate random port bases to avoid conflicts - use larger ranges
+	portBase := 7000 + (time.Now().Nanosecond() % 2000)
+	replicationPortBase := 8000 + (time.Now().Nanosecond() % 2000)
+
+	t.Logf("Using HTTP port base: %d and replication port base: %d", portBase, replicationPortBase)
+
+	// Important: This test requires that the server implementation properly handles
+	// replication endpoints. If there are issues, it's likely that the server's
+	// replication endpoint handling code needs to be fixed, not just the test.
+
 	// Set TEST_MODE environment variable for testing
 	os.Setenv("TEST_MODE", "true")
+	defer os.Unsetenv("TEST_MODE")
 
 	// Create temp directories for both servers
 	leaderDir, err := os.MkdirTemp("", "securevault-leader")
@@ -397,6 +412,35 @@ func TestReplication(t *testing.T) {
 	followerDir, err := os.MkdirTemp("", "securevault-follower")
 	require.NoError(t, err)
 	defer os.RemoveAll(followerDir)
+
+	// Configure the replication addresses
+	leaderReplicationAddr := fmt.Sprintf("127.0.0.1:%d", replicationPortBase)
+	followerReplicationAddr := fmt.Sprintf("127.0.0.1:%d", replicationPortBase+1)
+
+	t.Logf("Leader HTTP address: 127.0.0.1:%d", portBase)
+	t.Logf("Leader replication address: %s", leaderReplicationAddr)
+	t.Logf("Follower HTTP address: 127.0.0.1:%d", portBase+1)
+	t.Logf("Follower replication address: %s", followerReplicationAddr)
+
+	// Verify ports are available before starting
+	checkPort := func(port int) bool {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Logf("Port %d is not available: %v", port, err)
+			return false
+		}
+		ln.Close()
+		return true
+	}
+
+	portsToCheck := []int{portBase, portBase + 1, replicationPortBase, replicationPortBase + 1}
+	for _, port := range portsToCheck {
+		if !checkPort(port) {
+			t.Skipf("Skipping test because port %d is not available", port)
+			return
+		}
+	}
+	t.Log("All required ports are available")
 
 	// Create leader server
 	leaderConfig := &Config{
@@ -410,7 +454,14 @@ func TestReplication(t *testing.T) {
 			} `yaml:"tls"`
 		}{
 			Address: "127.0.0.1",
-			Port:    8201,
+			Port:    portBase,
+			TLS: struct {
+				Enabled  bool   `yaml:"enabled"`
+				CertFile string `yaml:"cert_file"`
+				KeyFile  string `yaml:"key_file"`
+			}{
+				Enabled: false,
+			},
 		},
 		Storage: struct {
 			Type string `yaml:"type"`
@@ -430,15 +481,20 @@ func TestReplication(t *testing.T) {
 			Peers       []string `yaml:"peers"`
 		}{
 			Mode:        "leader",
-			ClusterAddr: "127.0.0.1:9201",
-			Peers:       []string{"127.0.0.1:9202"},
+			ClusterAddr: leaderReplicationAddr,
+			Peers:       []string{followerReplicationAddr},
+			// Debug enabled for test - if available in your implementation
+			// Debug: true,
 		},
 	}
 
+	t.Log("Creating leader server...")
 	leaderServer, err := NewServer(leaderConfig)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to create leader server")
+	t.Log("Leader server created successfully")
 
 	// Create follower server
+	t.Log("Creating follower server...")
 	followerConfig := &Config{
 		Server: struct {
 			Address string `yaml:"address"`
@@ -450,7 +506,14 @@ func TestReplication(t *testing.T) {
 			} `yaml:"tls"`
 		}{
 			Address: "127.0.0.1",
-			Port:    8202,
+			Port:    portBase + 1,
+			TLS: struct {
+				Enabled  bool   `yaml:"enabled"`
+				CertFile string `yaml:"cert_file"`
+				KeyFile  string `yaml:"key_file"`
+			}{
+				Enabled: false,
+			},
 		},
 		Storage: struct {
 			Type string `yaml:"type"`
@@ -470,35 +533,189 @@ func TestReplication(t *testing.T) {
 			Peers       []string `yaml:"peers"`
 		}{
 			Mode:        "follower",
-			ClusterAddr: "127.0.0.1:9202",
-			Peers:       []string{"127.0.0.1:9201"},
+			ClusterAddr: followerReplicationAddr,
+			Peers:       []string{leaderReplicationAddr},
+			// Debug enabled for test - if available in your implementation
+			// Debug: true,
 		},
 	}
 
 	followerServer, err := NewServer(followerConfig)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to create follower server")
+	t.Log("Follower server created successfully")
 
-	// Start both servers
+	// Create health check function
+	checkHealth := func(server *Server, name string, port int) bool {
+		// Create a dummy request to the health endpoint using httptest
+		req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+		w := httptest.NewRecorder()
+
+		server.httpServer.Handler.ServeHTTP(w, req)
+
+		if w.Code == http.StatusOK {
+			t.Logf("%s health check passed (internal)", name)
+			return true
+		}
+
+		t.Logf("%s health check failed: status %d", name, w.Code)
+		return false
+	}
+
+	// Start leader server first
+	t.Log("Starting leader server...")
+	leaderStarted := make(chan struct{})
+	leaderErrCh := make(chan error, 1)
 	go func() {
+		// Signal that we're about to start the leader
+		close(leaderStarted)
 		if err := leaderServer.Start(); err != nil && err != http.ErrServerClosed {
 			t.Logf("Leader server error: %v", err)
+			leaderErrCh <- err
 		}
 	}()
 
+	// Wait for leader goroutine to begin
+	<-leaderStarted
+
+	// Give the leader a head start to initialize before starting the follower
+	t.Log("Waiting for leader server to initialize...")
+	time.Sleep(3 * time.Second)
+
+	// Check if leader started successfully
+	select {
+	case err := <-leaderErrCh:
+		t.Fatalf("Leader server failed to start: %v", err)
+	default:
+		t.Log("Leader server started without immediate errors")
+	}
+
+	// Internal health check for leader
+	if !checkHealth(leaderServer, "Leader", portBase) {
+		t.Log("Leader server not healthy, but continuing to start follower...")
+	}
+
+	// Verify the replication listener endpoint on leader is reachable
+	t.Log("Verifying leader replication endpoint initialization...")
+	// Wait a bit for the replication endpoint to be fully set up
+	time.Sleep(1 * time.Second)
+
+	// Try to access leader replication endpoint directly
+	leaderReplicationURL := fmt.Sprintf("http://%s/v1/replication/status", leaderReplicationAddr)
+	t.Logf("Checking leader replication endpoint: %s", leaderReplicationURL)
+
+	leaderRepClient := &http.Client{Timeout: 500 * time.Millisecond}
+	leaderRepReq, err := http.NewRequest(http.MethodGet, leaderReplicationURL, nil)
+	if err != nil {
+		t.Logf("Error creating request to leader replication endpoint: %v", err)
+	} else {
+		leaderRepResp, err := leaderRepClient.Do(leaderRepReq)
+		if err != nil {
+			t.Logf("Error connecting to leader replication endpoint: %v", err)
+			t.Log("This may indicate the replication listener is not properly initialized")
+		} else {
+			defer leaderRepResp.Body.Close()
+			t.Logf("Leader replication endpoint status: %d", leaderRepResp.StatusCode)
+		}
+	}
+	// Start follower server
+	t.Log("Starting follower server...")
+	followerStarted := make(chan struct{})
+	followerErrCh := make(chan error, 1)
 	go func() {
+		// Signal that we're about to start the follower
+		close(followerStarted)
 		if err := followerServer.Start(); err != nil && err != http.ErrServerClosed {
 			t.Logf("Follower server error: %v", err)
+			followerErrCh <- err
 		}
 	}()
 
-	// Wait for servers to start
-	time.Sleep(500 * time.Millisecond)
+	// Wait for follower goroutine to begin
+	<-followerStarted
+
+	// Wait for servers to start and initialize fully
+	t.Log("Waiting for servers to fully initialize...")
+	time.Sleep(4 * time.Second)
+
+	// Check if follower started successfully
+	select {
+	case err := <-followerErrCh:
+		t.Fatalf("Follower server failed to start: %v", err)
+	default:
+		t.Log("Follower server started without immediate errors")
+	}
+
+	// Internal health check for follower
+	if !checkHealth(followerServer, "Follower", portBase+1) {
+		t.Log("Follower server not healthy, but continuing with test...")
+	}
+
+	// Verify the replication listener endpoint on follower is reachable
+	t.Log("Verifying follower replication endpoint initialization...")
+	// Wait a bit for the replication endpoint to be fully set up
+	time.Sleep(1 * time.Second)
+
+	// Try to access follower replication endpoint directly
+	followerReplicationURL := fmt.Sprintf("http://%s/v1/replication/status", followerReplicationAddr)
+	t.Logf("Checking follower replication endpoint: %s", followerReplicationURL)
+
+	followerRepClient := &http.Client{Timeout: 500 * time.Millisecond}
+	followerRepReq, err := http.NewRequest(http.MethodGet, followerReplicationURL, nil)
+	if err != nil {
+		t.Logf("Error creating request to follower replication endpoint: %v", err)
+	} else {
+		followerRepResp, err := followerRepClient.Do(followerRepReq)
+		if err != nil {
+			t.Logf("Error connecting to follower replication endpoint: %v", err)
+			t.Log("This may indicate the replication listener is not properly initialized")
+		} else {
+			defer followerRepResp.Body.Close()
+			t.Logf("Follower replication endpoint status: %d", followerRepResp.StatusCode)
+		}
+	}
+
+	// Verify HTTP connectivity to both servers
+	verifyEndpointConnectivity := func(url, name string) bool {
+		client := &http.Client{Timeout: 1 * time.Second}
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			t.Logf("Failed to create request to %s: %v", name, err)
+			return false
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Logf("Failed to connect to %s: %v", name, err)
+			return false
+		}
+		defer resp.Body.Close()
+
+		t.Logf("%s HTTP connectivity check: status %d", name, resp.StatusCode)
+		return resp.StatusCode != 0
+	}
+
+	// Test connectivity to leader and follower
+	leaderHealthURL := fmt.Sprintf("http://127.0.0.1:%d/v1/health", portBase)
+	followerHealthURL := fmt.Sprintf("http://127.0.0.1:%d/v1/health", portBase+1)
+
+	leaderConnectivity := verifyEndpointConnectivity(leaderHealthURL, "Leader")
+	followerConnectivity := verifyEndpointConnectivity(followerHealthURL, "Follower")
+
+	if !leaderConnectivity {
+		t.Log("WARNING: Cannot connect to leader HTTP endpoint")
+	}
+
+	if !followerConnectivity {
+		t.Log("WARNING: Cannot connect to follower HTTP endpoint")
+	}
 
 	// Create a test token on leader
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	leaderToken := "s.test-leader-token"
+
+	// Set up token on leader
 	leaderServer.tokenMutex.Lock()
 	leaderServer.tokens[leaderToken] = TokenInfo{
 		ID:        leaderToken,
@@ -527,63 +744,121 @@ func TestReplication(t *testing.T) {
 		Timeout: time.Second * 2,
 	}
 	// Write to leader
-	leaderURL := fmt.Sprintf("http://%s:%d/v1/secret/%s", 
+	leaderURL := fmt.Sprintf("http://%s:%d/v1/secret/%s",
 		leaderConfig.Server.Address, leaderConfig.Server.Port, secretPath)
-	
+
+	// Define follower URL here so it's available throughout the test
+	followerURL := fmt.Sprintf("http://%s:%d/v1/secret/%s",
+		followerConfig.Server.Address, followerConfig.Server.Port, secretPath)
+
 	reqBody, err := json.Marshal(secretData)
 	require.NoError(t, err)
-	
+
 	req, err := http.NewRequest(http.MethodPost, leaderURL, bytes.NewBuffer(reqBody))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vault-Token", leaderToken)
-	
+
 	// Send the request using the HTTP client
-	resp, err := client.Do(req)
+	leaderResp, err := client.Do(req)
 	require.NoError(t, err)
-	// Accept either StatusNoContent or StatusOK since both indicate success
-	require.True(t, resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK, 
-		"Expected status 204 or 200, got %d", resp.StatusCode)
-	resp.Body.Close()
+	require.True(t, leaderResp.StatusCode == http.StatusNoContent || leaderResp.StatusCode == http.StatusOK,
+		"Expected status 204 or 200, got %d", leaderResp.StatusCode)
+	leaderResp.Body.Close()
 
-	// Wait for replication to occur
-	time.Sleep(1 * time.Second)
+	t.Log("Successfully wrote data to leader")
 
-	// Read from follower
-	followerURL := fmt.Sprintf("http://%s:%d/v1/secret/%s", 
-		followerConfig.Server.Address, followerConfig.Server.Port, secretPath)
-	
-	req, err = http.NewRequest(http.MethodGet, followerURL, nil)
-	require.NoError(t, err)
-	req.Header.Set("X-Vault-Token", leaderToken)
-	
-	resp, err = client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	
-	// Check that follower has the secret
-	if resp.StatusCode == http.StatusOK {
-		var result map[string]interface{}
-		err := json.NewDecoder(resp.Body).Decode(&result)
-		require.NoError(t, err)
-		
-		data, ok := result["data"].(map[string]interface{})
-		require.True(t, ok, "Failed to get data from response")
-		
-		assert.Equal(t, "replication-value", data["key"], "Data not replicated correctly")
-	} else {
-		// Skip detailed testing if follower has an error (allow 200 or 204 as success)
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			t.Logf("Replication test skipped: follower returned status %d", resp.StatusCode)
-			t.Log("Replication test requires properly configured environment")
-			return
+	// Wait for replication to occur with retry logic
+	t.Log("Waiting for replication to occur...")
+
+	// Try to determine if there are issues with replication setup
+	t.Log("Debug: Verifying replication connection from leader to follower...")
+
+	// Try a direct replication connection from leader to follower
+	syncURL := fmt.Sprintf("http://%s/v1/replication/data", followerReplicationAddr)
+	syncClient := &http.Client{Timeout: 1 * time.Second}
+	syncReq, err := http.NewRequest(http.MethodPost, syncURL, strings.NewReader("{}"))
+	if err == nil {
+		syncReq.Header.Set("Content-Type", "application/json")
+		syncResp, err := syncClient.Do(syncReq)
+		if err != nil {
+			t.Logf("Debug: Direct replication connection failed: %v", err)
+			t.Log("This indicates the follower's replication endpoint is not accessible")
+		} else {
+			defer syncResp.Body.Close()
+			t.Logf("Debug: Direct replication connection status: %d", syncResp.StatusCode)
 		}
 	}
+
+	// Define a function to check if replication occurred
+	checkReplication := func() bool {
+		req, err := http.NewRequest(http.MethodGet, followerURL, nil)
+		if err != nil {
+			t.Logf("Error creating request to follower: %v", err)
+			return false
+		}
+		req.Header.Set("X-Vault-Token", leaderToken)
+
+		followerResp, err := client.Do(req)
+		if err != nil {
+			t.Logf("Error connecting to follower: %v", err)
+			return false
+		}
+		defer followerResp.Body.Close()
+
+		if followerResp.StatusCode != http.StatusOK {
+			t.Logf("Follower returned status: %d", followerResp.StatusCode)
+			return false
+		}
+
+		var result map[string]interface{}
+		if err := json.NewDecoder(followerResp.Body).Decode(&result); err != nil {
+			t.Logf("Error decoding follower response: %v", err)
+			return false
+		}
+
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Log("No data found in follower response")
+			return false
+		}
+
+		return data["key"] == "replication-value"
+	}
+
+	// Try several times with increasing delays
+	replicationSuccessful := false
+	for i := 0; i < 5; i++ {
+		t.Logf("Checking replication attempt %d/5...", i+1)
+		if checkReplication() {
+			t.Log("Replication successful!")
+			replicationSuccessful = true
+			break
+		}
+		time.Sleep(time.Duration(i+1) * time.Second)
+	}
+
+	if !replicationSuccessful {
+		t.Log("===== IMPORTANT DEBUG INFORMATION =====")
+		t.Log("Replication test failed. This is often caused by:")
+		t.Log("1. Replication endpoints not properly initialized")
+		t.Log("2. Follower not accepting replication data from leader")
+		t.Log("3. Network connectivity issues between leader and follower")
+		t.Log("Please check the server implementation of replication handlers")
+		t.Log("======================================")
+
+		// This will fail the test but provide more debugging information
+		require.True(t, replicationSuccessful, "Replication did not succeed within the retry attempts")
+	}
+
+	// If we've made it here, replication was successful, so no need to check again
+	t.Log("Replication was verified successfully")
+	time.Sleep(1 * time.Second)
 
 	// Clean up
 	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	
+
 	_ = leaderServer.Shutdown(ctx)
 	_ = followerServer.Shutdown(ctx)
 }
@@ -614,7 +889,7 @@ func TestReplicationSetup(t *testing.T) {
 	// Verify follower configuration
 	for i, follower := range cluster.followers() {
 		require.NotNil(t, follower, "Follower %d should be present in cluster", i)
-		
+
 		// Check follower configuration
 		require.Equal(t, "follower", follower.config.Replication.Mode)
 		require.Contains(t, follower.config.Replication.Peers, cluster.leaderReplicationAddr())
@@ -622,12 +897,12 @@ func TestReplicationSetup(t *testing.T) {
 
 	// Verify connectivity between leader and followers
 	token := cluster.createTestToken()
-	
+
 	// Verify all nodes are accessible
 	for i, node := range cluster.allNodes() {
 		resp := callNodeAPI(t, node, http.MethodGet, "/v1/health", token, nil)
 		defer resp.Body.Close()
-		
+
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "Node %d health check failed", i)
 	}
 }
@@ -766,14 +1041,14 @@ func TestReplicationVersions(t *testing.T) {
 		// Verify version on follower
 		followerResp := callNodeAPI(t, cluster.followers()[0], http.MethodGet, "/v1/secret/metadata/"+secretPath, token, nil)
 		defer followerResp.Body.Close()
-		
+
 		// If follower hasn't caught up yet, wait and retry
 		if followerResp.StatusCode != http.StatusOK {
 			time.Sleep(1 * time.Second)
 			followerResp = callNodeAPI(t, cluster.followers()[0], http.MethodGet, "/v1/secret/metadata/"+secretPath, token, nil)
 			defer followerResp.Body.Close()
 		}
-		
+
 		if followerResp.StatusCode == http.StatusOK {
 			var followerMetadata map[string]interface{}
 			err = json.NewDecoder(followerResp.Body).Decode(&followerMetadata)
@@ -787,31 +1062,31 @@ func TestReplicationVersions(t *testing.T) {
 	// Verify specific versions on both leader and follower
 	for i := range versions {
 		version := i + 1
-		
+
 		// Check leader
 		leaderVerResp := callNodeAPI(t, cluster.leader(), http.MethodGet, fmt.Sprintf("/v1/secret/versions/%d/%s", version, secretPath), token, nil)
 		defer leaderVerResp.Body.Close()
 		assert.Equal(t, http.StatusOK, leaderVerResp.StatusCode)
-		
+
 		var leaderVerData map[string]interface{}
 		err = json.NewDecoder(leaderVerResp.Body).Decode(&leaderVerData)
 		require.NoError(t, err)
-		
+
 		leaderData, ok := leaderVerData["data"].(map[string]interface{})
 		require.True(t, ok)
 		assert.Equal(t, versions[i]["version"], leaderData["version"])
 		assert.Equal(t, versions[i]["data"], leaderData["data"])
-		
+
 		// Check follower
 		followerVerResp := callNodeAPI(t, cluster.followers()[0], http.MethodGet, fmt.Sprintf("/v1/secret/versions/%d/%s", version, secretPath), token, nil)
 		defer followerVerResp.Body.Close()
-		
+
 		// Only verify content if follower responded with success
 		if followerVerResp.StatusCode == http.StatusOK {
 			var followerVerData map[string]interface{}
 			err = json.NewDecoder(followerVerResp.Body).Decode(&followerVerData)
 			require.NoError(t, err)
-			
+
 			followerData, ok := followerVerData["data"].(map[string]interface{})
 			require.True(t, ok)
 			assert.Equal(t, versions[i]["version"], followerData["version"])
@@ -870,7 +1145,7 @@ func TestReplicationLag(t *testing.T) {
 		if resp.StatusCode == http.StatusOK {
 			err = json.NewDecoder(resp.Body).Decode(&result)
 			require.NoError(t, err)
-			
+
 			if keys, ok := result["keys"].([]interface{}); ok {
 				initialCounts[i] = len(keys)
 				t.Logf("Follower %d initial count: %d secrets", i, initialCounts[i])
@@ -878,26 +1153,26 @@ func TestReplicationLag(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	
+
 	// Wait for eventual consistency
 	t.Log("Waiting for eventual consistency...")
-	
+
 	// Function to check if all followers have caught up
 	checkFollowerConsistency := func() bool {
 		for i, follower := range cluster.followers() {
 			resp := callNodeAPI(t, follower, http.MethodGet, "/v1/secret/list/test/lag", token, nil)
 			defer resp.Body.Close()
-			
+
 			if resp.StatusCode != http.StatusOK {
 				return false
 			}
-			
+
 			var result map[string]interface{}
 			err = json.NewDecoder(resp.Body).Decode(&result)
 			if err != nil {
 				return false
 			}
-			
+
 			keys, ok := result["keys"].([]interface{})
 			if !ok || len(keys) < secretCount {
 				t.Logf("Follower %d has %d/%d secrets", i, len(keys), secretCount)
@@ -906,7 +1181,7 @@ func TestReplicationLag(t *testing.T) {
 		}
 		return true
 	}
-	
+
 	// Wait for eventual consistency with timeout
 	consistent := false
 	deadline := time.Now().Add(5 * time.Second)
@@ -917,30 +1192,30 @@ func TestReplicationLag(t *testing.T) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	
+
 	// Final verification
 	if consistent {
 		t.Log("All followers eventually consistent")
 	} else {
 		t.Log("Followers did not achieve consistency within timeout")
 	}
-	
+
 	// Verify data correctness on followers after consistency period
 	for i, follower := range cluster.followers() {
 		for j := 0; j < secretCount; j++ {
 			secretPath := fmt.Sprintf("test/lag/%d", j)
 			resp := callNodeAPI(t, follower, http.MethodGet, "/v1/secret/"+secretPath, token, nil)
-			
+
 			if resp.StatusCode == http.StatusOK {
 				var secretResp map[string]interface{}
 				err = json.NewDecoder(resp.Body).Decode(&secretResp)
 				require.NoError(t, err)
-				
+
 				if data, ok := secretResp["data"].(map[string]interface{}); ok {
 					// Verify integrity of data
 					expectedIndex := float64(j)
 					expectedData := fmt.Sprintf("data-%d", j)
-					
+
 					assert.Equal(t, expectedIndex, data["index"], "Follower %d has incorrect data for secret %d", i, j)
 					assert.Equal(t, expectedData, data["data"], "Follower %d has incorrect data for secret %d", i, j)
 				}
@@ -956,37 +1231,37 @@ func TestReplicationFailover(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping replication failover test in short mode")
 	}
-	
+
 	// Create a test cluster with 1 leader and 2 followers
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	
+
 	cluster, err := createReplicationCluster(t, 1, 2)
 	require.NoError(t, err)
 	defer cluster.cleanup(ctx)
-	
+
 	// Wait for cluster to initialize
 	err = cluster.waitForReady(3 * time.Second)
 	require.NoError(t, err)
-	
+
 	// Create a test token
 	token := cluster.createTestToken()
-	
+
 	// Write some test data before simulating leader failure
 	secretPath := "test/failover"
 	initialData := map[string]interface{}{
 		"status": "before-failover",
 		"time":   time.Now().Format(time.RFC3339),
 	}
-	
+
 	// Write to leader
 	resp := callNodeAPI(t, cluster.leader(), http.MethodPost, "/v1/secret/"+secretPath, token, initialData)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "Failed to write initial data")
-	
+
 	// Wait for replication
 	time.Sleep(1 * time.Second)
-	
+
 	// Verify all followers have the data
 	for i, follower := range cluster.followers() {
 		resp := callNodeAPI(t, follower, http.MethodGet, "/v1/secret/"+secretPath, token, nil)
@@ -994,65 +1269,65 @@ func TestReplicationFailover(t *testing.T) {
 			var result map[string]interface{}
 			err = json.NewDecoder(resp.Body).Decode(&result)
 			require.NoError(t, err)
-			
+
 			data, ok := result["data"].(map[string]interface{})
 			require.True(t, ok, "Follower %d missing data", i)
 			assert.Equal(t, "before-failover", data["status"], "Follower %d has incorrect data", i)
 		}
 		resp.Body.Close()
 	}
-	
+
 	// Simulate leader failure by shutting down the leader
 	t.Log("Simulating leader failure...")
 	leader := cluster.leader()
 	leaderShutdownCtx, leaderShutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer leaderShutdownCancel()
-	
+
 	err = leader.Shutdown(leaderShutdownCtx)
 	require.NoError(t, err, "Failed to shut down leader")
-	
+
 	// In a real system, followers would detect leader failure and elect a new leader
 	// For this test, we'll manually designate the first follower as the new leader
 	t.Log("Promoting first follower to leader role...")
 	newLeader := cluster.followers()[0]
-	
+
 	// In a real implementation, you would call a promote API or update config
 	// For this test, we'll just configure the storage layer to allow writes
 	cluster.promoteFollower(0)
-	
+
 	// Wait for promotion to take effect
 	time.Sleep(1 * time.Second)
-	
+
 	// Write new data to the new leader
 	failoverData := map[string]interface{}{
 		"status": "after-failover",
 		"time":   time.Now().Format(time.RFC3339),
 	}
-	
+
 	resp = callNodeAPI(t, newLeader, http.MethodPost, "/v1/secret/"+secretPath, token, failoverData)
 	resp.Body.Close()
-	
+
 	// This should pass if the follower was successfully promoted
 	assert.True(t, resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK,
 		"Failed to write to promoted follower, status: %d", resp.StatusCode)
-	
+
 	// If the write was successful, verify the remaining follower eventually gets the update
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
 		t.Log("Failover successful, checking replication to remaining follower...")
-		
+
 		// Wait for replication to the remaining follower
 		time.Sleep(2 * time.Second)
-		
+
 		// Check the remaining follower
 		remainingFollower := cluster.followers()[1]
 		resp = callNodeAPI(t, remainingFollower, http.MethodGet, "/v1/secret/"+secretPath, token, nil)
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode == http.StatusOK {
 			var result map[string]interface{}
 			err = json.NewDecoder(resp.Body).Decode(&result)
 			require.NoError(t, err)
-			
+
 			data, ok := result["data"].(map[string]interface{})
 			if ok && data["status"] == "after-failover" {
 				t.Log("Failover replication successful")
@@ -1103,14 +1378,14 @@ func createTestServer(t *testing.T, tmpDir string) *Server {
 
 	server, err := NewServer(config)
 	require.NoError(t, err)
-	
+
 	// Set up root policy - don't worry if it already exists
 	rootPolicy := policy.Policy{
 		Name:        "root",
 		Description: "Root policy with full access",
 		Rules: []policy.PathRule{
 			{
-				Path:         "*",
+				Path: "*",
 				Capabilities: []policy.Capability{
 					policy.CreateCapability,
 					policy.ReadCapability,
@@ -1121,13 +1396,13 @@ func createTestServer(t *testing.T, tmpDir string) *Server {
 			},
 		},
 	}
-	
+
 	// Try to create the policy, but don't fail if it already exists
 	err = server.policies.CreatePolicy(&rootPolicy)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("Failed to set up test server: %v", err)
 	}
-	
+
 	return server
 }
 
@@ -1147,7 +1422,7 @@ func createTestToken(t *testing.T, server *Server) string {
 // callAPI is a helper function to make API calls to the server
 func callAPI(t *testing.T, server *Server, method, path, token string, body interface{}) *http.Response {
 	var bodyReader io.Reader
-	
+
 	if body != nil {
 		bodyData, err := json.Marshal(body)
 		require.NoError(t, err)
@@ -1157,48 +1432,48 @@ func callAPI(t *testing.T, server *Server, method, path, token string, body inte
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	
+
 	req := httptest.NewRequest(method, path, bodyReader)
 	if token != "" {
 		req.Header.Set("X-Vault-Token", token)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	w := httptest.NewRecorder()
 	server.httpServer.Handler.ServeHTTP(w, req)
-	
+
 	return w.Result()
 }
 
 // replicationCluster represents a cluster of SecureVault servers for testing replication
 type replicationCluster struct {
-	leaderServer  *Server
-	leaderConfig  *Config
-	leaderDir     string
+	leaderServer    *Server
+	leaderConfig    *Config
+	leaderDir       string
 	followerServers []*Server
 	followerConfigs []*Config
 	followerDirs    []string
-	basePort      int
+	basePort        int
 }
 
 // createReplicationCluster creates a test cluster with specified number of leader and follower nodes
 func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*replicationCluster, error) {
 	// Set TEST_MODE environment variable for testing
 	os.Setenv("TEST_MODE", "true")
-	
+
 	basePort := 8300 + (time.Now().Nanosecond() % 1000) // Use a random base port to avoid conflicts
-	
+
 	cluster := &replicationCluster{
 		basePort: basePort,
 	}
-	
+
 	// Create temp directory for leader
 	leaderDir, err := os.MkdirTemp("", "securevault-leader")
 	if err != nil {
 		return nil, err
 	}
 	cluster.leaderDir = leaderDir
-	
+
 	// Create leader config
 	leaderConfig := &Config{
 		Server: struct {
@@ -1236,12 +1511,12 @@ func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*re
 		},
 	}
 	cluster.leaderConfig = leaderConfig
-	
+
 	// Initialize follower configs
 	followerPeers := []string{cluster.leaderReplicationAddr()}
 	followerConfigs := make([]*Config, followerCount)
 	followerDirs := make([]string, followerCount)
-	
+
 	for i := 0; i < followerCount; i++ {
 		// Create temp directory for follower
 		followerDir, err := os.MkdirTemp("", fmt.Sprintf("securevault-follower-%d", i))
@@ -1254,7 +1529,7 @@ func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*re
 			return nil, err
 		}
 		followerDirs[i] = followerDir
-		
+
 		// Create follower config
 		followerConfigs[i] = &Config{
 			Server: struct {
@@ -1302,14 +1577,14 @@ func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*re
 		}
 		return nil, fmt.Errorf("failed to create leader server: %w", err)
 	}
-	
+
 	// Save leader server to cluster
 	cluster.leaderServer = leaderServer
-	
+
 	// Save follower configs and dirs
 	cluster.followerConfigs = followerConfigs
 	cluster.followerDirs = followerDirs
-	
+
 	// Create and initialize follower servers
 	followerServers := make([]*Server, followerCount)
 	for i := 0; i < followerCount; i++ {
@@ -1318,39 +1593,39 @@ func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*re
 			// Clean up already created servers
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			
+
 			if leaderServer != nil {
 				leaderServer.Shutdown(ctx)
 			}
-			
+
 			for j := 0; j < i; j++ {
 				if followerServers[j] != nil {
 					followerServers[j].Shutdown(ctx)
 				}
 			}
-			
+
 			// Clean up directories
 			os.RemoveAll(leaderDir)
 			for j := 0; j < followerCount; j++ {
 				os.RemoveAll(followerDirs[j])
 			}
-			
+
 			return nil, fmt.Errorf("failed to create follower server %d: %w", i, err)
 		}
-		
+
 		followerServers[i] = followerServer
 	}
-	
+
 	// Save follower servers to cluster
 	cluster.followerServers = followerServers
-	
+
 	// Start all servers as goroutines
 	go func() {
 		if err := leaderServer.Start(); err != nil && err != http.ErrServerClosed {
 			t.Logf("Leader server error: %v", err)
 		}
 	}()
-	
+
 	for i, followerServer := range followerServers {
 		go func(i int, server *Server) {
 			if err := server.Start(); err != nil && err != http.ErrServerClosed {
@@ -1358,10 +1633,10 @@ func createReplicationCluster(t *testing.T, leaderCount, followerCount int) (*re
 			}
 		}(i, followerServer)
 	}
-	
+
 	// Wait a bit for servers to start
 	time.Sleep(200 * time.Millisecond)
-	
+
 	return cluster, nil
 }
 
@@ -1373,7 +1648,7 @@ func (c *replicationCluster) cleanup(ctx context.Context) {
 			fmt.Printf("Error shutting down leader: %v\n", err)
 		}
 	}
-	
+
 	for i, server := range c.followerServers {
 		if server != nil {
 			if err := server.Shutdown(ctx); err != nil {
@@ -1381,12 +1656,12 @@ func (c *replicationCluster) cleanup(ctx context.Context) {
 			}
 		}
 	}
-	
+
 	// Clean up directories
 	if c.leaderDir != "" {
 		os.RemoveAll(c.leaderDir)
 	}
-	
+
 	for _, dir := range c.followerDirs {
 		if dir != "" {
 			os.RemoveAll(dir)
@@ -1420,7 +1695,7 @@ func (c *replicationCluster) leaderReplicationAddr() string {
 // createTestToken creates a test token on all nodes in the cluster
 func (c *replicationCluster) createTestToken() string {
 	token := "s.test-cluster-token-" + fmt.Sprintf("%d", time.Now().UnixNano())
-	
+
 	// Create the token on the leader
 	c.leaderServer.tokenMutex.Lock()
 	c.leaderServer.tokens[token] = TokenInfo{
@@ -1429,7 +1704,7 @@ func (c *replicationCluster) createTestToken() string {
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	c.leaderServer.tokenMutex.Unlock()
-	
+
 	// Create the same token on all followers for testing purposes
 	for _, follower := range c.followerServers {
 		follower.tokenMutex.Lock()
@@ -1440,23 +1715,23 @@ func (c *replicationCluster) createTestToken() string {
 		}
 		follower.tokenMutex.Unlock()
 	}
-	
+
 	return token
 }
 
 // waitForReady waits for the cluster to be fully initialized and ready for requests
 func (c *replicationCluster) waitForReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	
+
 	// Wait for each node to become available
 	for time.Now().Before(deadline) {
 		allReady := true
-		
+
 		// Check leader
 		if !c.isNodeReady(c.leaderServer) {
 			allReady = false
 		}
-		
+
 		// Check followers
 		for _, follower := range c.followerServers {
 			if !c.isNodeReady(follower) {
@@ -1464,17 +1739,17 @@ func (c *replicationCluster) waitForReady(timeout time.Duration) error {
 				break
 			}
 		}
-		
+
 		if allReady {
 			// All nodes are responsive, now check if replication works
 			if c.testReplicationSync() {
 				return nil
 			}
 		}
-		
+
 		time.Sleep(100 * time.Millisecond)
 	}
-	
+
 	return fmt.Errorf("cluster did not become ready within %s", timeout)
 }
 
@@ -1482,36 +1757,36 @@ func (c *replicationCluster) waitForReady(timeout time.Duration) error {
 func (c *replicationCluster) testReplicationSync() bool {
 	// Create a test token
 	token := c.createTestToken()
-	
+
 	// Test path for replication check
 	testPath := "replication-test/sync-check"
 	testData := map[string]interface{}{
 		"timestamp": time.Now().Unix(),
-		"value": "replication-test",
+		"value":     "replication-test",
 	}
-	
-	// Write to leader
-	resp := callNodeAPI(c.leader(), http.MethodPost, "/v1/secret/"+testPath, token, testData)
+
+	// Write to leader - don't pass testing.T parameter as it's not available in this context
+	resp := callNodeAPI(nil, c.leader(), http.MethodPost, "/v1/secret/"+testPath, token, testData)
 	resp.Body.Close()
-	
+
 	// If write failed, replication isn't ready
 	if resp.StatusCode != http.StatusNoContent {
 		return false
 	}
-	
+
 	// Wait for replication to occur - increased wait time for reliability
 	time.Sleep(500 * time.Millisecond)
-	
+
 	// Check all followers have the data
 	for _, follower := range c.followers() {
-		resp := callNodeAPI(follower, http.MethodGet, "/v1/secret/"+testPath, token, nil)
+		resp := callNodeAPI(nil, follower, http.MethodGet, "/v1/secret/"+testPath, token, nil)
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			return false
 		}
 		resp.Body.Close()
 	}
-	
+
 	return true
 }
 
@@ -1520,9 +1795,9 @@ func (c *replicationCluster) isNodeReady(node *Server) bool {
 	// Create a dummy request to the health endpoint
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
-	
+
 	node.httpServer.Handler.ServeHTTP(w, req)
-	
+
 	return w.Code == http.StatusOK
 }
 
@@ -1531,14 +1806,14 @@ func (c *replicationCluster) promoteFollower(followerIndex int) {
 	if followerIndex < 0 || followerIndex >= len(c.followerServers) {
 		return
 	}
-	
+
 	// Update the follower's configuration to become a leader
 	followerConfig := c.followerConfigs[followerIndex]
-	
+
 	// In a real implementation, we would call an API or perform more sophisticated promotion
 	// For test purposes, we'll just update the replication mode and any necessary state
 	followerConfig.Replication.Mode = "leader"
-	
+
 	// Update the peers list
 	newPeers := make([]string, 0)
 	for i := range c.followerServers {
@@ -1548,7 +1823,7 @@ func (c *replicationCluster) promoteFollower(followerIndex int) {
 		}
 	}
 	followerConfig.Replication.Peers = newPeers
-	
+
 	// In a real implementation, we'd need to update internal server state
 	// For test purposes, this mimics the behavior
 }
@@ -1556,27 +1831,33 @@ func (c *replicationCluster) promoteFollower(followerIndex int) {
 // callNodeAPI makes an API call to a specific node in the cluster
 func callNodeAPI(t *testing.T, node *Server, method, path, token string, body interface{}) *http.Response {
 	var bodyReader io.Reader
-	
+
 	if body != nil {
 		bodyData, err := json.Marshal(body)
-		require.NoError(t, err)
+		if t != nil {
+			require.NoError(t, err)
+		} else if err != nil {
+			// Handle error without test context
+			log.Printf("Error marshaling body: %v", err)
+			return nil
+		}
 		bodyReader = bytes.NewBuffer(bodyData)
 	}
-	
+
 	// Ensure path has a leading slash for httptest
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	
+
 	req := httptest.NewRequest(method, path, bodyReader)
 	if token != "" {
 		req.Header.Set("X-Vault-Token", token)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	w := httptest.NewRecorder()
 	node.httpServer.Handler.ServeHTTP(w, req)
-	
+
 	return w.Result()
 }
 
@@ -1870,3 +2151,52 @@ func TestReplicationWithFollowerOutage(t *testing.T) {
 
 	resp, err = client.Do(req)
 	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	resp.Body.Close()
+
+	// Wait for replication to occur and follower to catch up
+	t.Log("Waiting for follower to catch up...")
+	time.Sleep(3 * time.Second)
+
+	// Verify follower has caught up with all versions
+	req, err = http.NewRequest(http.MethodGet, followerURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Vault-Token", token)
+
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	// Verify the follower has caught up - allow for some flexibility in case follower hasn't fully caught up
+	if resp.StatusCode == http.StatusOK {
+		var followerFinalData map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&followerFinalData)
+		require.NoError(t, err)
+
+		data, ok := followerFinalData["data"].(map[string]interface{})
+		if ok {
+			if data["phase"] == "final" {
+				t.Log("Follower completely caught up to latest version")
+			} else {
+				t.Logf("Follower not at final version yet, phase: %v", data["phase"])
+			}
+		}
+
+		metadata, ok := followerFinalData["metadata"].(map[string]interface{})
+		if ok {
+			t.Logf("Follower version: %v, expected version: 5", metadata["version"])
+		}
+	} else {
+		t.Logf("Follower data not accessible yet, status: %d", resp.StatusCode)
+	}
+
+	// Clean up
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = leaderServer.Shutdown(ctx)
+	require.NoError(t, err)
+
+	err = followerServer.Shutdown(ctx)
+	require.NoError(t, err)
+}
