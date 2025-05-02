@@ -1,0 +1,181 @@
+##
+## SecureVault Configuration File
+##
+## This file contains the configuration for a SecureVault server.
+## Each section controls different aspects of the server's behavior.
+##
+
+##
+## Server Configuration
+##
+## Controls the network settings for the server.
+##
+server:
+  # The address to bind the server to.
+  # Use "0.0.0.0" to bind to all interfaces or a specific IP address
+  # to restrict access to that network interface.
+  address: "0.0.0.0"
+  
+  # The port the server listens on for API requests.
+  # Default: 8200
+  port: 8200
+  
+  # TLS configuration for secure connections.
+  tls:
+    # Whether to enable TLS for the server.
+    # STRONGLY recommended for production environments.
+    enabled: true
+    
+    # Path to the certificate file.
+    # Required if TLS is enabled.
+    cert_file: "/path/to/certificate.pem"
+    
+    # Path to the private key file.
+    # Required if TLS is enabled.
+    key_file: "/path/to/key.pem"
+
+##
+## Storage Configuration
+##
+## Controls how and where secrets are stored.
+##
+storage:
+  # Storage backend type.
+  # Available options:
+  # - "file": Local file storage (default, simplest setup)
+  # - "mysql": MySQL database storage
+  # - "postgresql": PostgreSQL database storage
+  type: "file"
+  
+  # Path where secrets are stored.
+  # For "file" backend, this is a directory path.
+  # For database backends, this is a connection string.
+  path: "/var/lib/securevault/data"
+  
+  # Database-specific configuration (only used if type is "mysql" or "postgresql")
+  database:
+    # Database username
+    username: "securevault"
+    
+    # Database password
+    password: "complex-password"
+    
+    # Database host
+    host: "localhost"
+    
+    # Database port
+    port: 5432
+    
+    # Database name
+    name: "securevault"
+    
+    # Maximum number of database connections
+    max_connections: 20
+    
+    # Whether to use SSL for database connections
+    ssl: true
+
+##
+## Authentication Configuration
+##
+## Controls how authentication and access control work.
+##
+auth:
+  # Default token time-to-live (TTL).
+  # Tokens will expire after this duration unless renewed.
+  # Format examples: "1h", "30m", "12h", "7d"
+  token_ttl: "24h"
+  
+  # Maximum token TTL allowed when creating tokens.
+  # Requests for longer TTLs will be capped at this value.
+  token_max_ttl: "720h"  # 30 days
+  
+  # Whether to allow token creation without authentication.
+  # ONLY enable during initial setup, then disable for security.
+  enable_unauthenticated_token_creation: false
+
+##
+## Replication Configuration
+##
+## Controls how this server replicates data in a multi-node setup.
+##
+replication:
+  # Operating mode for this server.
+  # Available options:
+  # - "standalone": No replication (default)
+  # - "leader": This node is a leader; can accept writes and replicate to followers
+  # - "follower": This node is a follower; read-only and receives updates from a leader
+  mode: "standalone"
+  
+  # Address for cluster communication.
+  # Required for "leader" and "follower" modes.
+  # Should be reachable by all nodes in the cluster.
+  cluster_addr: "10.0.1.4:8201"
+  
+  # List of peer addresses for replication.
+  # For leaders: addresses of followers to replicate to
+  # For followers: address of the leader to receive updates from
+  peers:
+    - "10.0.1.5:8201"
+    - "10.0.1.6:8201"
+    
+  # Replication consistency level
+  # Available options:
+  # - "eventual": Faster, but changes may not be immediately visible on all nodes
+  # - "strong": Slower, but ensures all nodes have the same data before returning
+  consistency: "strong"
+  
+  # Interval for replication heartbeats in seconds
+  heartbeat_interval: 5
+  
+  # Timeout in seconds for replication operations
+  operation_timeout: 10
+
+##
+## Logging Configuration
+##
+## Controls how and where logs are written.
+##
+logging:
+  # Log level
+  # Available options: "debug", "info", "warn", "error"
+  level: "info"
+  
+  # Log format
+  # Available options: "text", "json"
+  format: "json"
+  
+  # Log output location
+  # Use "stdout", "stderr", or a file path
+  output: "/var/log/securevault/server.log"
+  
+  # Whether to log sensitive data (NOT recommended for production)
+  log_sensitive_data: false
+  
+  # Whether to enable access logging for API requests
+  access_log: true
+
+##
+## Performance Tuning
+##
+## Advanced settings to optimize performance.
+##
+performance:
+  # Number of worker threads for processing requests
+  workers: 8
+  
+  # Maximum number of concurrent requests
+  max_concurrent_requests: 128
+  
+  # Request timeout in seconds
+  request_timeout: 30
+  
+  # Enable response caching (improves read performance)
+  cache_enabled: true
+  
+  # Maximum size of cache in megabytes
+  cache_size_mb: 128
+  
+  # Time-to-live for cached items in seconds
+  cache_ttl: 60
+

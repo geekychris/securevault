@@ -1,0 +1,364 @@
+##
+## SecureVault Production Configuration
+## 
+## This configuration file provides secure, production-ready settings for 
+## the SecureVault service with detailed security and performance tuning.
+##
+
+##
+## Server Configuration
+##
+## These settings control the network and API behavior of the server.
+##
+server:
+  # The address to bind the server to
+  # SECURITY: Use a private address or localhost in combination with a reverse proxy
+  # for public-facing deployments.
+  address: "0.0.0.0"
+  
+  # The port to listen on for API requests
+  # SECURITY: Use a non-standard port and configure firewalls accordingly.
+  port: 8200
+  
+  # TLS configuration
+  # SECURITY: Always enable TLS in production environments
+  tls:
+    enabled: true
+    # Use properly signed certificates from a trusted CA for production
+    cert_file: "/etc/securevault/tls/server.crt"
+    key_file: "/etc/securevault/tls/server.key"
+    # Minimum TLS version to accept
+    # SECURITY: TLS 1.2+ is required for security
+    min_version: "tls1.2"
+    # List of allowed cipher suites in order of preference
+    # SECURITY: Only modern, secure ciphers should be enabled
+    cipher_suites:
+      - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+      - "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+      - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+      - "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+  
+  # CORS settings - only enable if required
+  # SECURITY: Restrict allowed origins to only trusted domains
+  cors:
+    enabled: false
+    allowed_origins:
+      - "https://admin.yourcompany.com"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+
+##
+## Storage Configuration
+##
+## These settings control where and how secrets are stored
+##
+storage:
+  # Storage backend type
+  # Options: "file", "mysql", "postgresql"
+  # PERFORMANCE: Database backends generally offer better performance for high-load scenarios
+  # SECURITY: Ensure the underlying storage is encrypted
+  type: "postgresql"
+  
+  # Connection information
+  # SECURITY: Use separate database users with minimal permissions
+  # SECURITY: Store database credentials securely
+  database:
+    host: "vault-db.internal"
+    port: 5432
+    name: "securevault"
+    username: "svault"
+    # SECURITY: Use a complex password and rotate regularly
+    password: "change-me-and-use-env-var"
+    # Maximum number of connections to the database
+    # PERFORMANCE: Adjust based on your system resources and load
+    max_connections: 20
+    # Enable SSL for database connections
+    # SECURITY: Always enable SSL for database connections
+    ssl: true
+    # Connection timeout in seconds
+    # PERFORMANCE: Set based on network latency to database
+    connect_timeout: 10
+  
+  # File-based storage settings (when using file backend)
+  file:
+    # Directory where secrets are stored
+    # SECURITY: Ensure directory permissions are restricted to service account
+    path: "/var/lib/securevault/data"
+    # SECURITY: Enable filesystem encryption if possible
+
+##
+## Authentication Configuration
+##
+## These settings control how authentication works
+##
+auth:
+  # Default token time-to-live
+  # SECURITY: Use short-lived tokens to minimize risk if compromised
+  token_ttl: "12h"
+  
+  # Maximum allowed token TTL
+  # SECURITY: Limit maximum TTL to enforce regular rotation
+  token_max_ttl: "720h"
+  
+  # Token types allowed
+  # Options: "service", "batch", "all"
+  # SECURITY: Service tokens are revocable, batch tokens are lightweight but not revocable
+  token_types_allowed: "service"
+  
+  # Whether to allow token creation without authentication
+  # SECURITY: This should ALWAYS be false in production
+  enable_unauthenticated_token_creation: false
+  
+  # Number of allowed authentication failures before temporary lockout
+  # SECURITY: Prevents brute force attacks
+  auth_failure_threshold: 5
+  
+  # Lockout duration in minutes after too many failures
+  # SECURITY: Adjust based on security requirements
+  auth_lockout_duration_minutes: 15
+
+##
+## Replication Configuration
+##
+## These settings control how nodes replicate data for high availability
+##
+replication:
+  # Operating mode for this node
+  # Options:
+  # - "leader" - Primary node that accepts writes and replicates to followers
+  # - "follower" - Secondary node that receives updates from leader
+  # - "standalone" - Single node with no replication
+  # HA SETUP: Use "leader" for primary nodes, "follower" for read replicas
+  mode: "leader"
+  
+  # Address for cluster communication
+  # SECURITY: Use a private network for replication traffic
+  cluster_addr: "10.0.1.10:8201"
+  
+  # List of other nodes in the cluster
+  # For leader: list of followers to replicate to
+  # For follower: address of the leader
+  peers:
+    - "10.0.1.11:8201"
+    - "10.0.1.12:8201"
+  
+  # Replication consistency level
+  # Options:
+  # - "strong" - Ensure changes are applied to all nodes before confirming
+  # - "eventual" - Allow temporary inconsistency for better performance
+  # PERFORMANCE: "eventual" provides better performance but may serve stale data
+  # SECURITY: "strong" ensures all nodes have consistent data
+  consistency: "strong"
+  
+  # Replication timeout in seconds
+  # PERFORMANCE: Adjust based on network latency between nodes
+  # HA SETUP: Higher values improve stability in high-latency environments
+  replication_timeout: 30
+  
+  # Heartbeat interval in seconds
+  # PERFORMANCE: More frequent heartbeats detect node failures faster but increase network traffic
+  heartbeat_interval: 5
+  
+  # Number of failed heartbeats before a node is considered down
+  # HA SETUP: Lower values trigger faster failover but may cause false positives
+  heartbeat_threshold: 3
+  
+  # Enable automatic failover
+  # HA SETUP: Enables automatic promotion of follower to leader if leader fails
+  auto_failover: true
+
+##
+## Performance Tuning
+##
+## These settings optimize the performance of the server
+##
+performance:
+  # Number of worker threads for processing requests
+  # PERFORMANCE: Set to number of CPU cores or slightly higher
+  workers: 8
+  
+  # Maximum number of concurrent requests
+  # PERFORMANCE: Adjust based on expected load and available resources
+  max_concurrent_requests: 256
+  
+  # Request timeout in seconds
+  # PERFORMANCE: Adjust based on expected operation time
+  request_timeout: 30
+  
+  # Enable response caching
+  # PERFORMANCE: Improves read performance but uses more memory
+  cache_enabled: true
+  
+  # Maximum size of cache in megabytes
+  # PERFORMANCE: Larger cache improves performance but uses more memory
+  cache_size_mb: 256
+  
+  # Time-to-live for cached items in seconds
+  # SECURITY: Lower values ensure fresher data but reduce cache effectiveness
+  cache_ttl: 60
+
+##
+## Logging Configuration
+##
+## These settings control the logging behavior
+##
+logging:
+  # Log level
+  # Options: "debug", "info", "warn", "error"
+  # SECURITY: Use "info" or higher in production to avoid excessive logs
+  level: "info"
+  
+  # Log format
+  # Options: "text", "json"
+  # SECURITY: "json" is better for automated log processing and analysis
+  format: "json"
+  
+  # Log output location
+  # Options: "stdout", "stderr", or a file path
+  # SECURITY: Log to a secure location with appropriate permissions
+  output: "/var/log/securevault/server.log"
+  
+  # Log rotation settings
+  rotation:
+    # Maximum size in MB before rotating
+    max_size_mb: 100
+    # Number of rotated files to keep
+    max_backups: 10
+    # Maximum age of logs in days
+    max_age_days: 30
+    # Compress rotated logs
+    compress: true
+  
+  # Whether to log sensitive data (e.g., secret paths)
+  # SECURITY: Should be false in production to avoid leaking sensitive information
+  log_sensitive_data: false
+  
+  # Whether to enable access logging for API requests
+  # SECURITY: Enable for compliance and audit purposes
+  access_log: true
+  
+  # Access log format
+  # SECURITY: Include client IP, timestamp, and requested operation but not secret values
+  access_log_format: "{timestamp} {client_ip} {method} {path} {status_code} {response_time_ms}"
+
+##
+## Audit Logging
+##
+## These settings control audit logging for compliance and security monitoring
+##
+audit:
+  # Enable audit logging
+  # SECURITY: Should be enabled in production for compliance and security tracking
+  enabled: true
+  
+  # Audit log destinations
+  # Multiple destinations can be configured for redundancy
+  destinations:
+    # File-based audit logs
+    - type: "file"
+      path: "/var/log/securevault/audit.log"
+      # Mode for new log files
+      mode: "0600"
+      # Format of the audit logs (json or csv)
+      format: "json"
+      # Log rotation settings
+      rotation:
+        # Maximum size in MB before rotating
+        max_size_mb: 100
+        # Number of rotated files to keep
+        max_backups: 30
+        # Maximum age of logs in days
+        max_age_days: 90
+        # Compress rotated logs
+        compress: true
+    
+    # Syslog-based audit logs
+    - type: "syslog"
+      # Syslog facility to use
+      facility: "auth"
+      # Syslog tag
+      tag: "securevault"
+      # Format of the audit logs
+      format: "json"
+      # Syslog endpoint (if using remote syslog)
+      #endpoint: "10.0.1.5:514"
+
+##
+## Security Settings
+##
+## Additional security settings for production environments
+##
+security:
+  # Rate limiting to prevent abuse
+  # SECURITY: Prevents brute force and DoS attacks
+  rate_limiting:
+    enabled: true
+    # Requests per second per client IP
+    rate: 50
+    # Burst capacity (allows temporary spikes)
+    burst: 100
+  
+  # IP-based access control
+  # SECURITY: Restrict access to specific networks or IP addresses
+  ip_whitelist:
+    enabled: true
+    allowed_cidrs:
+      - "10.0.0.0/8"     # Internal network
+      - "172.16.0.0/12"  # VPN network
+      - "192.168.0.0/16" # Development network
+  
+  # API request size limits
+  # SECURITY: Prevents resource exhaustion attacks
+  request_limits:
+    # Maximum request body size in MB
+    max_request_size_mb: 10
+    # Maximum number of keys in a JSON payload
+    max_json_keys: 100
+  
+  # Auto-unsealing settings (if applicable)
+  # SECURITY: Consider cloud KMS for auto-unsealing in cloud environments
+  auto_unseal:
+    enabled: false
+    # Options: "awskms", "gcpkms", "azurekms", "pkcs11"
+    provider: "awskms"
+    # Provider-specific settings would go here
+  
+  # Secure TLS client authentication
+  # SECURITY: Provides mutual TLS authentication for clients
+  client_cert_auth:
+    enabled: false
+    ca_cert_file: "/etc/securevault/tls/ca.crt"
+
+##
+## Backup Configuration
+##
+## Settings for automated backups
+##
+backup:
+  # Enable automated backups
+  # HA SETUP: Critical for disaster recovery
+  enabled: true
+  
+  # Backup schedule in cron format
+  # HA SETUP: Daily backups are recommended minimum
+  schedule: "0 2 * * *"  # Every day at 2 AM
+  
+  # Backup storage location
+  # SECURITY: Store backups in a secure, encrypted location
+  path: "/var/backups/securevault"
+  
+  # Number of backups to retain
+  # HA SETUP: Keep multiple backups to allow point-in-time recovery
+  retention_count: 30
+  
+  # Whether to encrypt backups
+  # SECURITY: Always encrypt backup files
+  encrypt: true
+  
+  # Compression level (0-9, where 0 is no compression and 9 is maximum)
+  # PERFORMANCE: Higher values use more CPU but produce smaller backups
+  compression_level: 6
+
