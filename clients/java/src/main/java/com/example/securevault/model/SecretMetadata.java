@@ -1,58 +1,36 @@
 package com.example.securevault.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.Instant;
 import java.util.Map;
 
 /**
- * Metadata about a secret.
+ * Metadata for a secret.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class SecretMetadata {
-    private Map<String, VersionMetadata> versions;
-    private int currentVersion;
+    @JsonProperty("created_time")
     private Instant createdTime;
-    private Instant lastModified;
+    
+    @JsonProperty("updated_time")
+    private Instant updatedTime;
+    
+    @JsonProperty("version")
+    private int version;
+    
+    @JsonProperty("current_version")
+    private int currentVersion;
+    
+    @JsonProperty("versions")
+    private Map<String, VersionMetadata> versions;
+    
+    @JsonProperty("metadata")
+    private Map<String, String> metadata;
 
     /**
-     * Gets version metadata for all versions of the secret.
-     *
-     * @return the version metadata map
-     */
-    public Map<String, VersionMetadata> getVersions() {
-        return versions;
-    }
-
-    /**
-     * Sets version metadata for all versions of the secret.
-     *
-     * @param versions the version metadata map
-     */
-    public void setVersions(Map<String, VersionMetadata> versions) {
-        this.versions = versions;
-    }
-
-    /**
-     * Gets the current version number.
-     *
-     * @return the current version
-     */
-    public int getCurrentVersion() {
-        return currentVersion;
-    }
-
-    /**
-     * Sets the current version number.
-     *
-     * @param currentVersion the current version
-     */
-    public void setCurrentVersion(int currentVersion) {
-        this.currentVersion = currentVersion;
-    }
-
-    /**
-     * Gets the time the secret was created.
+     * Gets the time when the secret was created.
      *
      * @return the created time
      */
@@ -61,7 +39,7 @@ public class SecretMetadata {
     }
 
     /**
-     * Sets the time the secret was created.
+     * Sets the time when the secret was created.
      *
      * @param createdTime the created time
      */
@@ -70,61 +48,43 @@ public class SecretMetadata {
     }
 
     /**
-     * Gets the time the secret was last modified.
+     * Gets the time when the secret was last updated.
      *
-     * @return the last modified time
+     * @return the updated time
      */
-    public Instant getLastModified() {
-        return lastModified;
+    public Instant getUpdatedTime() {
+        return updatedTime;
     }
 
     /**
-     * Sets the time the secret was last modified.
+     * Sets the time when the secret was last updated.
      *
-     * @param lastModified the last modified time
+     * @param updatedTime the updated time
      */
-    public void setLastModified(Instant lastModified) {
-        this.lastModified = lastModified;
-    }
-}
-
-package com.example.securevault.model;
-
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
-import java.time.Instant;
-import java.util.Map;
-
-/**
- * Metadata about a secret.
- */
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class SecretMetadata {
-    private Map<String, VersionMetadata> versions;
-    private int currentVersion;
-    private Instant createdTime;
-    private Instant lastModified;
-
-    /**
-     * Gets version metadata for all versions of the secret.
-     *
-     * @return the version metadata map
-     */
-    public Map<String, VersionMetadata> getVersions() {
-        return versions;
+    public void setUpdatedTime(Instant updatedTime) {
+        this.updatedTime = updatedTime;
     }
 
     /**
-     * Sets version metadata for all versions of the secret.
+     * Gets the version of the secret.
      *
-     * @param versions the version metadata map
+     * @return the version
      */
-    public void setVersions(Map<String, VersionMetadata> versions) {
-        this.versions = versions;
+    public int getVersion() {
+        return version;
     }
 
     /**
-     * Gets the current version number.
+     * Sets the version of the secret.
+     *
+     * @param version the version
+     */
+    public void setVersion(int version) {
+        this.version = version;
+    }
+
+    /**
+     * Gets the current version of the secret.
      *
      * @return the current version
      */
@@ -133,7 +93,7 @@ public class SecretMetadata {
     }
 
     /**
-     * Sets the current version number.
+     * Sets the current version of the secret.
      *
      * @param currentVersion the current version
      */
@@ -142,39 +102,38 @@ public class SecretMetadata {
     }
 
     /**
-     * Gets the time the secret was created.
+     * Gets metadata for all versions of the secret.
      *
-     * @return the created time
+     * @return the versions metadata
      */
-    public Instant getCreatedTime() {
-        return createdTime;
+    public Map<String, VersionMetadata> getVersions() {
+        return versions;
     }
 
     /**
-     * Sets the time the secret was created.
+     * Sets metadata for all versions of the secret.
      *
-     * @param createdTime the created time
+     * @param versions the versions metadata
      */
-    public void setCreatedTime(Instant createdTime) {
-        this.createdTime = createdTime;
+    public void setVersions(Map<String, VersionMetadata> versions) {
+        this.versions = versions;
     }
 
     /**
-     * Gets the time the secret was last modified.
+     * Gets custom metadata for the secret.
      *
-     * @return the last modified time
+     * @return the metadata
      */
-    public Instant getLastModified() {
-        return lastModified;
+    public Map<String, String> getMetadata() {
+        return metadata;
     }
 
     /**
-     * Sets the time the secret was last modified.
+     * Sets custom metadata for the secret.
      *
-     * @param lastModified the last modified time
+     * @param metadata the metadata
      */
-    public void setLastModified(Instant lastModified) {
-        this.lastModified = lastModified;
+    public void setMetadata(Map<String, String> metadata) {
+        this.metadata = metadata;
     }
 }
-

@@ -194,11 +194,29 @@ TokenCreateOptions options = TokenCreateOptions.builder()
     .withPolicies(Arrays.asList("app-read", "app-write"))
     .withTtl(Duration.ofHours(8))
     .build();
-
 TokenResponse token = client.createToken(options);
 String newTokenId = token.getTokenId();
+
+// Looking up token information
+TokenLookupResponse tokenInfo = client.lookupToken(newTokenId);
+System.out.println("Token expires at: " + tokenInfo.getExpireTime());
+
+// Renewing a token
+TokenRenewOptions renewOptions = TokenRenewOptions.builder()
+    .withToken(newTokenId)
+    .withIncrement(Duration.ofHours(12))
+    .build();
+TokenResponse renewedToken = client.renewToken(renewOptions);
+
+// Revoking a token when done with it
+TokenRevokeOptions revokeOptions = TokenRevokeOptions.builder()
+    .withToken(newTokenId)
+    .withRevokeChild(true)
+    .build();
+client.revokeToken(revokeOptions);
 ```
 
+### API Example
 ### API Example
 
 ```

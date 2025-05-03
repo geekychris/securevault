@@ -1,40 +1,52 @@
 package com.example.securevault.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.time.Instant;
 import java.util.Map;
 
 /**
- * Metadata about a specific version of a secret.
+ * Metadata for a specific version of a secret.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class VersionMetadata {
+    @JsonProperty("created_time")
     private Instant createdTime;
+    
+    @JsonProperty("created_by")
     private String createdBy;
+    
+    @JsonProperty("deleted_time")
     private Instant deletedTime;
+    
+    @JsonProperty("deleted_by")
     private String deletedBy;
+    
+    @JsonProperty("is_destroyed")
     private boolean isDestroyed;
+    
+    @JsonProperty("metadata")
     private Map<String, Object> customMetadata;
 
     /**
-     * Gets the time this version was created.
+     * Gets the time when this version was created.
      *
      * @return the created time
      */
     public Instant getCreatedTime() {
         return createdTime;
     }
-
+    
     /**
-     * Sets the time this version was created.
+     * Sets the time when this version was created.
      *
      * @param createdTime the created time
      */
     public void setCreatedTime(Instant createdTime) {
         this.createdTime = createdTime;
     }
-
+    
     /**
      * Gets the ID of who created this version.
      *
@@ -43,7 +55,7 @@ public class VersionMetadata {
     public String getCreatedBy() {
         return createdBy;
     }
-
+    
     /**
      * Sets the ID of who created this version.
      *
@@ -125,4 +137,3 @@ public class VersionMetadata {
         this.customMetadata = customMetadata;
     }
 }
-

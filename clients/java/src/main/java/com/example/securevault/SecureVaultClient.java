@@ -1,15 +1,14 @@
 package com.example.securevault;
 
-import com.example.securevault.config.ClientConfig;
 import com.example.securevault.exception.SecureVaultException;
 import com.example.securevault.exception.SecureVaultForbiddenException;
 import com.example.securevault.exception.SecureVaultNotFoundException;
 import com.example.securevault.exception.SecureVaultUnauthorizedException;
 import com.example.securevault.model.*;
+import com.example.securevault.model.ClientConfig;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.hc.client5.http.classic.methods.*;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -21,13 +20,8 @@ import org.apache.hc.core5.http.HttpStatus;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.hc.core5.util.Timeout;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -35,247 +29,106 @@ import java.util.concurrent.TimeUnit;
  * Client for interacting with the SecureVault API.
  */
 public class SecureVaultClient implements AutoCloseable {
-    private static final Logger logger = LoggerFactory.getLogger(SecureVaultClient.class);
-    private static final String API_VERSION = "v1";
-    private static final int DEFAULT_MAX_RETRIES = 3;
-    
-    private final ClientConfig config;
-    private final CloseableHttpClient httpClient;
-    private final ObjectMapper objectMapper;
-    private String token;
-    private final Object tokenLock = new Object();
-
     /**
-     * Creates a new client with the provided configuration.
+     * Creates a new builder for SecureVaultClient.
+     *
+     * @return a new builder instance
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+    /**
+     * API version to use for all requests.
+     */
+    private static final String API_VERSION = "v1";
+    
+    /**
+     * The HTTP client for making API requests.
+     */
+    private final CloseableHttpClient httpClient;
+    
+    /**
+     * The client configuration.
+     */
+    private final ClientConfig config;
+    
+    /**
+     * The authentication token to use for API requests.
+     */
+    private String token;
+    
+    /**
+     * The JSON object mapper.
+     */
+    private final ObjectMapper objectMapper;
+    
+    /**
+     * Creates a new client with the given configuration.
      *
      * @param config the client configuration
      */
     public SecureVaultClient(ClientConfig config) {
         this.config = config;
         this.token = config.getToken();
-        this.objectMapper = createObjectMapper();
-        this.httpClient = createHttpClient();
-    }
-
-    /**
-     * Creates an ObjectMapper with custom configuration.
-     */
-    private ObjectMapper createObjectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        // Register JavaTimeModule for handling Java 8 date/time types
-        mapper.registerModule(new JavaTimeModule());
-        return mapper;
-    }
-
-    /**
-     * Creates a configured HTTP client.
-     */
-    private CloseableHttpClient createHttpClient() {
-        PoolingHttpClientConnectionManager connManager = new PoolingHttpClientConnectionManager();
-        connManager.setMaxTotal(config.getMaxConnections());
-        connManager.setDefaultMaxPerRoute(config.getMaxConnectionsPerRoute());
+        this.objectMapper = new ObjectMapper();
+        
+        PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager();
+        connectionManager.setMaxTotal(config.getMaxConnections());
+        connectionManager.setDefaultMaxPerRoute(config.getMaxConnectionsPerRoute());
         
         RequestConfig requestConfig = RequestConfig.custom()
                 .setResponseTimeout(Timeout.of(config.getRequestTimeoutMillis(), TimeUnit.MILLISECONDS))
                 .setConnectTimeout(Timeout.of(config.getConnectTimeoutMillis(), TimeUnit.MILLISECONDS))
                 .build();
         
-        return HttpClients.custom()
-                .setConnectionManager(connManager)
+        this.httpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)
                 .setDefaultRequestConfig(requestConfig)
                 .build();
     }
 
     /**
-     * Returns a new builder for creating a client.
-     *
-     * @return a new builder
-     */
-    public static Builder builder() {
-        return new Builder();
-    }
-
-    /**
      * Writes a secret to the vault.
      *
-     * @param path the path to the secret
-     * @param data the secret data to write
+     * @param path   the path to the secret
+     * @param secret the secret data to write
      * @return true if the operation was successful
      * @throws SecureVaultException if an error occurs
      */
-    public boolean writeSecret(String path, Map<String, Object> data) throws SecureVaultException {
-        return writeSecret(path, data, null);
+    public boolean writeSecret(String path, Map<String, Object> secret) throws SecureVaultException {
+        return writeSecret(path, secret, null);
     }
-
+    
     /**
      * Writes a secret to the vault with options.
      *
      * @param path    the path to the secret
-     * @param data    the secret data to write
+     * @param secret  the secret data to write
      * @param options options for the write operation
      * @return true if the operation was successful
      * @throws SecureVaultException if an error occurs
      */
-    public boolean writeSecret(String path, Map<String, Object> data, WriteOptions options) throws SecureVaultException {
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("data", data);
-        
-        if (options != null && options.getMetadata() != null) {
-            requestBody.put("metadata", options.getMetadata());
-        }
-        
+    public boolean writeSecret(String path, Map<String, Object> secret, com.example.securevault.model.WriteOptions options) throws SecureVaultException {
         try {
-            String uri = buildUri("/secret/" + path);
-            HttpPost request = new HttpPost(uri);
-            request.setEntity(createJsonEntity(requestBody));
+            StringBuilder uriBuilder = new StringBuilder(buildUri("/secret/" + path));
             
-            try (CloseableHttpResponse response = executeRequestWithRetry(request)) {
-                int statusCode = response.getCode();
-                if (statusCode == HttpStatus.SC_NO_CONTENT || statusCode == HttpStatus.SC_OK) {
-                    return true;
-                } else {
-                    handleErrorResponse(response);
-                    return false;
+            if (options != null) {
+                List<String> queryParams = new ArrayList<>();
+                
+                if (options.getCas() != null) {
+                    queryParams.add("cas=" + options.getCas());
+                }
+                
+                if (!queryParams.isEmpty()) {
+                    uriBuilder.append("?").append(String.join("&", queryParams));
                 }
             }
-        } catch (SecureVaultException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new SecureVaultException("Failed to write secret: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Reads the latest version of a secret from the vault.
-     *
-     * @
-
-package com.example.securevault;
-
-import com.example.securevault.config.ClientConfig;
-import com.example.securevault.exception.SecureVaultException;
-import com.example.securevault.model.*;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.hc.client5.http.classic.methods.*;
-import org.apache.hc.client5.http.config.RequestConfig;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.core5.http.ContentType;
-import org.apache.hc.core5.http.HttpStatus;
-import org.apache.hc.core5.http.io.entity.EntityUtils;
-import org.apache.hc.core5.http.io.entity.StringEntity;
-import org.apache.hc.core5.util.Timeout;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
-
-/**
- * Client for interacting with the SecureVault API.
- */
-public class SecureVaultClient implements AutoCloseable {
-    private static final Logger logger = LoggerFactory.getLogger(SecureVaultClient.class);
-    private static final String API_VERSION = "v1";
-    
-    private final ClientConfig config;
-    private final CloseableHttpClient httpClient;
-    private final ObjectMapper objectMapper;
-    private String token;
-
-    /**
-     * Creates a new client with the provided configuration.
-     *
-     * @param config the client configuration
-     */
-    public SecureVaultClient(ClientConfig config) {
-        this.config = config;
-        this.token = config.getToken();
-        this.objectMapper = createObjectMapper();
-        this.httpClient = createHttpClient();
-    }
-
-    /**
-     * Creates an ObjectMapper with custom configuration.
-     */
-    private ObjectMapper createObjectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.findAndRegisterModules(); // For Java 8 date/time types
-        return mapper;
-    }
-
-    /**
-     * Creates a configured HTTP client.
-     */
-    private CloseableHttpClient createHttpClient() {
-        PoolingHttpClientConnectionManager connManager = new PoolingHttpClientConnectionManager();
-        connManager.setMaxTotal(config.getMaxConnections());
-        connManager.setDefaultMaxPerRoute(config.getMaxConnectionsPerRoute());
-        
-        RequestConfig requestConfig = RequestConfig.custom()
-                .setResponseTimeout(Timeout.of(config.getRequestTimeoutMillis(), TimeUnit.MILLISECONDS))
-                .setConnectTimeout(Timeout.of(config.getConnectTimeoutMillis(), TimeUnit.MILLISECONDS))
-                .build();
-        
-        return HttpClients.custom()
-                .setConnectionManager(connManager)
-                .setDefaultRequestConfig(requestConfig)
-                .build();
-    }
-
-    /**
-     * Returns a new builder for creating a client.
-     *
-     * @return a new builder
-     */
-    public static Builder builder() {
-        return new Builder();
-    }
-
-    /**
-     * Writes a secret to the vault.
-     *
-     * @param path the path to the secret
-     * @param data the secret data to write
-     * @return true if the operation was successful
-     * @throws SecureVaultException if an error occurs
-     */
-    public boolean writeSecret(String path, Map<String, Object> data) throws SecureVaultException {
-        return writeSecret(path, data, null);
-    }
-
-    /**
-     * Writes a secret to the vault with options.
-     *
-     * @param path    the path to the secret
-     * @param data    the secret data to write
-     * @param options options for the write operation
-     * @return true if the operation was successful
-     * @throws SecureVaultException if an error occurs
-     */
-    public boolean writeSecret(String path, Map<String, Object> data, WriteOptions options) throws SecureVaultException {
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("data", data);
-        
-        if (options != null && options.getMetadata() != null) {
-            requestBody.put("metadata", options.getMetadata());
-        }
-        
-        try {
-            String uri = buildUri("/secret/" + path);
-            HttpPost request = new HttpPost(uri);
-            request.setEntity(createJsonEntity(requestBody));
+            
+            HttpPost request = new HttpPost(uriBuilder.toString());
+            request.setEntity(createJsonEntity(secret));
             
             try (CloseableHttpResponse response = executeRequest(request)) {
-                int statusCode = response.getCode();
-                if (statusCode == HttpStatus.SC_NO_CONTENT || statusCode == HttpStatus.SC_OK) {
+                if (response.getCode() == HttpStatus.SC_NO_CONTENT || response.getCode() == HttpStatus.SC_OK) {
                     return true;
                 } else {
                     handleErrorResponse(response);
@@ -288,39 +141,38 @@ public class SecureVaultClient implements AutoCloseable {
     }
 
     /**
-     * Reads the latest version of a secret from the vault.
+     * Reads a secret from the vault.
      *
      * @param path the path to the secret
-     * @return the secret
+     * @return the secret data
      * @throws SecureVaultException if an error occurs
      */
-    public Secret readSecret(String path) throws SecureVaultException {
-        return readSecret(path, null);
+    public Map<String, Object> readSecret(String path) throws SecureVaultException {
+        return readSecret(path, (Long) null);
     }
-
+    
     /**
-     * Reads a specific version of a secret from the vault.
+     * Reads a secret from the vault.
      *
      * @param path    the path to the secret
-     * @param options options for the read operation
-     * @return the secret
+     * @param version the version of the secret to read (optional)
+     * @return the secret data
      * @throws SecureVaultException if an error occurs
      */
-    public Secret readSecret(String path, ReadOptions options) throws SecureVaultException {
+    public Map<String, Object> readSecret(String path, Long version) throws SecureVaultException {
         try {
-            String uri;
-            if (options != null && options.getVersion() > 0) {
-                uri = buildUri(String.format("/secret/%s/versions/%d", path, options.getVersion()));
-            } else {
-                uri = buildUri("/secret/" + path);
+            StringBuilder uriBuilder = new StringBuilder(buildUri("/secret/" + path));
+            
+            if (version != null) {
+                uriBuilder.append("?version=").append(version);
             }
             
-            HttpGet request = new HttpGet(uri);
+            HttpGet request = new HttpGet(uriBuilder.toString());
             
             try (CloseableHttpResponse response = executeRequest(request)) {
                 if (response.getCode() == HttpStatus.SC_OK) {
                     String json = EntityUtils.toString(response.getEntity());
-                    return objectMapper.readValue(json, Secret.class);
+                    return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
                 } else {
                     handleErrorResponse(response);
                     return null;
@@ -330,7 +182,6 @@ public class SecureVaultClient implements AutoCloseable {
             throw new SecureVaultException("Failed to read secret", e);
         }
     }
-
     /**
      * Deletes a secret from the vault.
      *
@@ -350,7 +201,7 @@ public class SecureVaultClient implements AutoCloseable {
      * @return true if the operation was successful
      * @throws SecureVaultException if an error occurs
      */
-    public boolean deleteSecret(String path, DeleteOptions options) throws SecureVaultException {
+    public boolean deleteSecret(String path, com.example.securevault.model.DeleteOptions options) throws SecureVaultException {
         try {
             StringBuilder uriBuilder = new StringBuilder(buildUri("/secret/" + path));
             
@@ -406,7 +257,7 @@ public class SecureVaultClient implements AutoCloseable {
      * @return a list of secret paths
      * @throws SecureVaultException if an error occurs
      */
-    public List<String> listSecrets(String path, ListOptions options) throws SecureVaultException {
+    public List<String> listSecrets(String path, com.example.securevault.model.ListOptions options) throws SecureVaultException {
         try {
             // Normalize path
             if (!path.isEmpty() && !path.endsWith("/")) {
@@ -598,10 +449,10 @@ public class SecureVaultClient implements AutoCloseable {
      * Creates a new authentication token.
      *
      * @param options options for creating the token
-     * @return the token
+     * @return the token response
      * @throws SecureVaultException if an error occurs
      */
-    public String createToken(TokenOptions options) throws SecureVaultException {
+    public TokenResponse createToken(TokenCreateOptions options) throws SecureVaultException {
         try {
             String uri = buildUri("/auth/token/create");
             HttpPost request = new HttpPost(uri);
@@ -610,9 +461,7 @@ public class SecureVaultClient implements AutoCloseable {
             try (CloseableHttpResponse response = executeRequest(request)) {
                 if (response.getCode() == HttpStatus.SC_OK) {
                     String json = EntityUtils.toString(response.getEntity());
-                    Map<String, String> result = objectMapper.readValue(json, 
-                            new TypeReference<Map<String, String>>() {});
-                    return result.get("token");
+                    return objectMapper.readValue(json, TokenResponse.class);
                 } else {
                     handleErrorResponse(response);
                     return null;
@@ -620,6 +469,190 @@ public class SecureVaultClient implements AutoCloseable {
             }
         } catch (Exception e) {
             throw new SecureVaultException("Failed to create token", e);
+        }
+    }
+
+    /**
+     * Renews an authentication token.
+     *
+     * @param options options for renewing the token
+     * @return the renewed token response
+     * @throws SecureVaultException if an error occurs
+     */
+    public TokenResponse renewToken(TokenRenewOptions options) throws SecureVaultException {
+        try {
+            String uri = buildUri("/auth/token/renew");
+            HttpPost request = new HttpPost(uri);
+            request.setEntity(createJsonEntity(options));
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_OK) {
+                    String json = EntityUtils.toString(response.getEntity());
+                    return objectMapper.readValue(json, TokenResponse.class);
+                } else {
+                    handleErrorResponse(response);
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to renew token", e);
+        }
+    }
+
+    /**
+     * Renews the current authentication token.
+     *
+     * @param increment the renewal increment (e.g. "1h", "30m")
+     * @return the renewed token response
+     * @throws SecureVaultException if an error occurs
+     */
+    public TokenResponse renewSelfToken(String increment) throws SecureVaultException {
+        try {
+            String uri = buildUri("/auth/token/renew-self");
+            HttpPost request = new HttpPost(uri);
+            
+            Map<String, String> requestBody = new HashMap<>();
+            if (increment != null && !increment.isEmpty()) {
+                requestBody.put("increment", increment);
+            }
+            
+            request.setEntity(createJsonEntity(requestBody));
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_OK) {
+                    String json = EntityUtils.toString(response.getEntity());
+                    return objectMapper.readValue(json, TokenResponse.class);
+                } else {
+                    handleErrorResponse(response);
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to renew self token", e);
+        }
+    }
+
+    /**
+     * Looks up information about an authentication token.
+     *
+     * @param token the token to look up
+     * @return the token lookup response
+     * @throws SecureVaultException if an error occurs
+     */
+    public TokenLookupResponse lookupToken(String token) throws SecureVaultException {
+        try {
+            String uri = buildUri("/auth/token/lookup");
+            HttpPost request = new HttpPost(uri);
+            
+            Map<String, String> requestBody = new HashMap<>();
+            requestBody.put("token", token);
+            
+            request.setEntity(createJsonEntity(requestBody));
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_OK) {
+                    String json = EntityUtils.toString(response.getEntity());
+                    return objectMapper.readValue(json, TokenLookupResponse.class);
+                } else {
+                    handleErrorResponse(response);
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to look up token", e);
+        }
+    }
+
+    /**
+     * Looks up information about the current authentication token.
+     *
+     * @return the token lookup response
+     * @throws SecureVaultException if an error occurs
+     */
+    public TokenLookupResponse lookupSelfToken() throws SecureVaultException {
+        try {
+            String uri = buildUri("/auth/token/lookup-self");
+            HttpGet request = new HttpGet(uri);
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_OK) {
+                    String json = EntityUtils.toString(response.getEntity());
+                    return objectMapper.readValue(json, TokenLookupResponse.class);
+                } else {
+                    handleErrorResponse(response);
+                    return null;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to look up self token", e);
+        }
+    }
+
+    /**
+     * Revokes an authentication token.
+     *
+     * @param options options for revoking the token
+     * @return true if the operation was successful
+     * @throws SecureVaultException if an error occurs
+     */
+    public boolean revokeToken(TokenRevokeOptions options) throws SecureVaultException {
+        try {
+            StringBuilder uriBuilder = new StringBuilder(buildUri("/auth/token/revoke"));
+            
+            List<String> queryParams = new ArrayList<>();
+            if (options.getOrphan() != null && options.getOrphan()) {
+                queryParams.add("orphan=true");
+            }
+            
+            if (options.getRevokeChild() != null && options.getRevokeChild()) {
+                queryParams.add("revoke_child=true");
+            }
+            
+            if (!queryParams.isEmpty()) {
+                uriBuilder.append("?").append(String.join("&", queryParams));
+            }
+            
+            HttpPost request = new HttpPost(uriBuilder.toString());
+            
+            Map<String, String> requestBody = new HashMap<>();
+            requestBody.put("token", options.getToken());
+            
+            request.setEntity(createJsonEntity(requestBody));
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_NO_CONTENT || response.getCode() == HttpStatus.SC_OK) {
+                    return true;
+                } else {
+                    handleErrorResponse(response);
+                    return false;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to revoke token", e);
+        }
+    }
+
+    /**
+     * Revokes the current authentication token.
+     *
+     * @return true if the operation was successful
+     * @throws SecureVaultException if an error occurs
+     */
+    public boolean revokeSelfToken() throws SecureVaultException {
+        try {
+            String uri = buildUri("/auth/token/revoke-self");
+            HttpPost request = new HttpPost(uri);
+            
+            try (CloseableHttpResponse response = executeRequest(request)) {
+                if (response.getCode() == HttpStatus.SC_NO_CONTENT || response.getCode() == HttpStatus.SC_OK) {
+                    return true;
+                } else {
+                    handleErrorResponse(response);
+                    return false;
+                }
+            }
+        } catch (Exception e) {
+            throw new SecureVaultException("Failed to revoke self token", e);
         }
     }
 
@@ -644,28 +677,64 @@ public class SecureVaultClient implements AutoCloseable {
 
     /**
      * Builds a URI for the API.
+     * 
+     * @param path the API path
+     * @return the full API URI
+     */
+    /**
+     * Builds a URI for the API.
+     * Note that the API_VERSION is already included in the path by the SecureVault server,
+     * so we don't append it here.
+     * 
+     * @param path the API path
+     * @return the full API URI
      */
     private String buildUri(String path) {
-        return config.getAddress() + "/" + API_VERSION + path;
+        // Add the /v1 prefix to all API paths
+        if (path.startsWith("/")) {
+            // If the path already starts with a slash, just add the v1 before it
+            return config.getAddress() + "/v1" + path;
+        } else {
+            // Otherwise add /v1/ including the slash
+            return config.getAddress() + "/v1/" + path;
+        }
     }
 
     /**
      * Creates a JSON entity from an object.
+     * 
+     * @param obj the object to convert to JSON
+     * @return the StringEntity containing the JSON
+     * @throws JsonProcessingException if the object cannot be converted to JSON
      */
     private StringEntity createJsonEntity(Object obj) throws JsonProcessingException {
-        return new StringEntity(objectMapper.writeValueAsString(obj), ContentType.APPLICATION_JSON);
+        String json = objectMapper.writeValueAsString(obj);
+        return new StringEntity(json, ContentType.APPLICATION_JSON);
     }
 
     /**
      * Executes an HTTP request with token authentication.
+     * 
+     * @param request the HTTP request to execute
+     * @return the HTTP response
+     * @throws IOException if an I/O error occurs
      */
     private CloseableHttpResponse executeRequest(HttpUriRequest request) throws IOException {
-        request.setHeader("X-Vault-Token", token);
+        if (token != null && !token.isEmpty()) {
+            request.setHeader("X-Vault-Token", token);
+        }
         return httpClient.execute(request);
     }
 
     /**
      * Handles error responses from the API.
+     * 
+     * @param response the HTTP response containing an error
+     * @throws IOException if an I/O error occurs
+     * @throws SecureVaultException if an API error occurs
+     * @throws SecureVaultNotFoundException if the requested resource was not found
+     * @throws SecureVaultUnauthorizedException if authentication is required
+     * @throws SecureVaultForbiddenException if access is forbidden
      */
     private void handleErrorResponse(CloseableHttpResponse response) throws IOException {
         int statusCode = response.getCode();
@@ -673,9 +742,22 @@ public class SecureVaultClient implements AutoCloseable {
         String errorMessage;
         try {
             String responseBody = EntityUtils.toString(response.getEntity());
-            Map<String, String> errorMap = objectMapper.readValue(responseBody, 
-                    new TypeReference<Map<String, String>>() {});
-            errorMessage = errorMap.getOrDefault("error", "Unknown error");
+            Map<String, Object> errorMap = objectMapper.readValue(responseBody, 
+                    new TypeReference<Map<String, Object>>() {});
+            
+            // SecureVault errors can be either a string or nested error object
+            Object errorObj = errorMap.get("error");
+            if (errorObj instanceof String) {
+                errorMessage = (String) errorObj;
+            } else if (errorObj instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> errorDetails = (Map<String, Object>) errorObj;
+                errorMessage = errorDetails.containsKey("message") 
+                    ? errorDetails.get("message").toString() 
+                    : "Unknown error details";
+            } else {
+                errorMessage = "Unknown error format";
+            }
         } catch (Exception e) {
             errorMessage = "Status code: " + statusCode;
         }
@@ -704,6 +786,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the server address.
+         *
+         * @param address the server address
+         * @return the builder
          */
         public Builder address(String address) {
             this.address = address;
@@ -712,6 +797,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the authentication token.
+         *
+         * @param token the authentication token
+         * @return the builder
          */
         public Builder token(String token) {
             this.token = token;
@@ -720,6 +808,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the maximum number of connections.
+         *
+         * @param maxConnections the maximum number of connections
+         * @return the builder
          */
         public Builder maxConnections(int maxConnections) {
             this.maxConnections = maxConnections;
@@ -728,6 +819,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the maximum number of connections per route.
+         *
+         * @param maxConnectionsPerRoute the maximum number of connections per route
+         * @return the builder
          */
         public Builder maxConnectionsPerRoute(int maxConnectionsPerRoute) {
             this.maxConnectionsPerRoute = maxConnectionsPerRoute;
@@ -736,6 +830,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the request timeout in milliseconds.
+         *
+         * @param requestTimeoutMillis the request timeout in milliseconds
+         * @return the builder
          */
         public Builder requestTimeout(long requestTimeoutMillis) {
             this.requestTimeoutMillis = requestTimeoutMillis;
@@ -744,6 +841,9 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Sets the connect timeout in milliseconds.
+         *
+         * @param connectTimeoutMillis the connect timeout in milliseconds
+         * @return the builder
          */
         public Builder connectTimeout(long connectTimeoutMillis) {
             this.connectTimeoutMillis = connectTimeoutMillis;
@@ -752,13 +852,37 @@ public class SecureVaultClient implements AutoCloseable {
         
         /**
          * Builds the client.
+         *
+         * @return a new SecureVaultClient instance
+         * @throws IllegalArgumentException if required configuration is missing
          */
         public SecureVaultClient build() {
             // Validate required fields
-            if (address == null || address.isEmpty()) {
-                throw new IllegalArgumentException("Address is required");
+            if (address == null || address.trim().isEmpty()) {
+                throw new IllegalArgumentException("Server address is required");
             }
             
+            // Token validation is optional since it can be set later or obtained through authentication
+            if (token != null && token.trim().isEmpty()) {
+                throw new IllegalArgumentException("Token cannot be empty if provided");
+            }
+            
+            // Validate connection settings
+            if (maxConnections < 1) {
+                throw new IllegalArgumentException("Maximum connections must be at least 1");
+            }
+            
+            if (maxConnectionsPerRoute < 1) {
+                throw new IllegalArgumentException("Maximum connections per route must be at least 1");
+            }
+            
+            if (requestTimeoutMillis < 0) {
+                throw new IllegalArgumentException("Request timeout cannot be negative");
+            }
+            
+            if (connectTimeoutMillis < 0) {
+                throw new IllegalArgumentException("Connect timeout cannot be negative");
+            }
             ClientConfig config = new ClientConfig();
             config.setAddress(address);
             config.setToken(token);
@@ -770,4 +894,5 @@ public class SecureVaultClient implements AutoCloseable {
             return new SecureVaultClient(config);
         }
     }
+    // All option classes are now in the model package
 }
