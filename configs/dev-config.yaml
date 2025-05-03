@@ -1,0 +1,15 @@
+server:
+  address: "127.0.0.1"
+  port: 8200
+  tls:
+    enabled: false  # Disable TLS for development
+
+storage:
+  type: "file"
+  path: "./data"    # Local storage path
+
+auth:
+  token_ttl: "24h"  # Default token lifetime
+
+replication:
+  mode: "standalone"
