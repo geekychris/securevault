@@ -1,0 +1,38 @@
+# Minimal SecureVault configuration for testing
+
+# Server configuration
+server:
+  # Only listen on localhost for testing
+  address: "127.0.0.1"
+  # Standard port
+  port: 8200
+  # Disable TLS for testing
+  tls:
+    enabled: false
+
+# Storage configuration
+storage:
+  # Use simple file storage
+  type: "file"
+  # Store data in a directory within the current project
+  path: "./vault-data"
+
+# Authentication configuration
+auth:
+  # Set a reasonable token TTL
+  token_ttl: "24h"
+
+# Replication configuration
+replication:
+  # No replication for testing
+  mode: "standalone"
+
+# Logging configuration
+logging:
+  # More verbose logging during testing
+  level: "debug"
+  # Simple text output
+  format: "text"
+  # Log to console
+  output: "stdout"
+
