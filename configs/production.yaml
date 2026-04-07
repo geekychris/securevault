@@ -57,36 +57,10 @@ server:
 ##
 storage:
   # Storage backend type
-  # Options: "file", "mysql", "postgresql"
-  # PERFORMANCE: Database backends generally offer better performance for high-load scenarios
-  # SECURITY: Ensure the underlying storage is encrypted
-  type: "postgresql"
-  
-  # Connection information
-  # SECURITY: Use separate database users with minimal permissions
-  # SECURITY: Store database credentials securely
-  database:
-    host: "vault-db.internal"
-    port: 5432
-    name: "securevault"
-    username: "svault"
-    # SECURITY: Use a complex password and rotate regularly
-    password: "change-me-and-use-env-var"
-    # Maximum number of connections to the database
-    # PERFORMANCE: Adjust based on your system resources and load
-    max_connections: 20
-    # Enable SSL for database connections
-    # SECURITY: Always enable SSL for database connections
-    ssl: true
-    # Connection timeout in seconds
-    # PERFORMANCE: Set based on network latency to database
-    connect_timeout: 10
-  
-  # File-based storage settings (when using file backend)
-  file:
-    # Directory where secrets are stored
-    # SECURITY: Ensure directory permissions are restricted to service account
-    path: "/var/lib/securevault/data"
+  type: "file"
+  # SECURITY: Ensure directory permissions are restricted to service account
+  # All data is AES-256-GCM encrypted at rest
+  path: "/var/lib/securevault/data"
     # SECURITY: Enable filesystem encryption if possible
 
 ##

@@ -298,7 +298,7 @@ When moving to production, never use test mode. Instead, follow these steps to s
        key_file: "/path/to/tls/key.pem"
    
    storage:
-     type: "file"  # Or other backend like "postgresql"
+     type: "file"
      path: "/secure/vault/data"
    
    auth:

@@ -13,7 +13,6 @@ server:
 
 ## Storage Configuration
 storage:
-  # "file" or "postgres"
   type: "file"
   path: "/var/lib/securevault/data"
 

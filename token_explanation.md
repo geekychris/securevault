@@ -8,9 +8,7 @@ This document provides comprehensive guidance on setting up a Vaultrix server, m
 
 - **Operating System**: Linux, macOS, or Windows Server
 - **Runtime**: Java 21+ (OpenJDK or Corretto 23 recommended)
-- **Database**: 
-  - For development: Built-in file storage
-  - For production: PostgreSQL 13+ recommended
+- **Storage**: Encrypted file-based storage
 - **Network**: Dedicated port (default: 8200) with appropriate firewall rules
 - **Hardware**: Minimum 2 CPU cores, 4GB RAM for production deployments
 
@@ -26,12 +24,8 @@ server:
   test_mode: false    # Controls automatic root token creation
 
 storage:
-  type: "postgres"    # Options: "file", "postgres"
-  # For PostgreSQL:
-  postgres:
-    host: "localhost"
-    port: 5432
-    database: "securevault"
+  type: "file"
+  path: "/var/lib/securevault/data"
     username: "vault_user"
     password: "vault_password"
     ssl_mode: "require"

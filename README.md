@@ -71,15 +71,14 @@ graph TB
 
     subgraph Storage
         FILE[File Backend<br/>AES-256-GCM]
-        PG[PostgreSQL Backend<br/>AES-256-GCM]
     end
 
     GO & JAVA & PY & RUST & UI -->|HTTP + X-Vault-Token| API
     API --> AUTH --> POLICY --> SECRETS
-    SECRETS --> FILE & PG
+    SECRETS --> FILE
     SECRETS --> REPL
     API --> AUDIT
-    SEAL -.->|encryption key| FILE & PG
+    SEAL -.->|encryption key| FILE
 ```
 
 ```mermaid
@@ -482,7 +481,7 @@ See [`examples/walkthrough/`](examples/walkthrough/README.md) for a complete end
 cmd/server/          Server entry point
 pkg/
   server/            HTTP handlers, auth, replication
-  storage/           File + PostgreSQL backends (encrypted)
+  storage/           File backend (AES-256-GCM encrypted)
   policy/            Policy engine with path matching
   seal/              Shamir's Secret Sharing + seal manager
   audit/             Audit logger
