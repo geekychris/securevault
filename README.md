@@ -2,7 +2,7 @@
 
 # Vaultrix — Secure Secrets Management
 
-Vaultrix is a secrets management system inspired by HashiCorp Vault. It provides encrypted storage, hierarchical access control, versioned secrets, multi-node replication, and client libraries for Go, Java, Python, and Rust.
+Vaultrix is a secrets management system that provides encrypted storage, hierarchical access control, versioned secrets, multi-node replication, and client libraries for Go, Java, Python, and Rust.
 
 ## Features
 
