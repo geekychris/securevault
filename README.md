@@ -1,1247 +1,436 @@
 ![Vaultrix](assets/vaultrix-logo.png)
 
-# Vaultrix - Secure Secrets Management System
+# Vaultrix — Secure Secrets Management
 
-Vaultrix is a secure secrets management system similar to HashiCorp Vault, designed to safely store, access, and distribute sensitive information like API keys, passwords, certificates, and other secrets.
-
-## Table of Contents
-
-- [Features](#features)
-- [System Requirements](#system-requirements)
-- [Quick Start](#quick-start)
-- [Running the Server](#running-the-server)
-- [Using the Go Client](#using-the-go-client)
-- [Using the Java Client](#using-the-java-client)
-- [Using the Python Client](#using-the-python-client)
-- [Permission Scenarios Examples](#permission-scenarios-examples)
-- [Secret Versioning](#secret-versioning)
-- [Replication Setup](#replication-setup)
-- [Security Considerations](#security-considerations)
-- [Backup and Recovery](#backup-and-recovery)
-- [Troubleshooting](#troubleshooting)
-- [Architecture](#architecture)
-- [Contributing](#contributing)
-- [License](#license)
+Vaultrix is a secrets management system inspired by HashiCorp Vault. It provides encrypted storage, hierarchical access control, versioned secrets, multi-node replication, and client libraries for Go, Java, Python, and Rust.
 
 ## Features
 
-- **Secure Secret Storage**: AES-256-GCM encrypted storage of sensitive information
-- **Fine-grained Access Control**: Policy-based access control for secret paths
-- **Versioning**: Full support for versioning of secrets with metadata
-- **Multi-node Support**: Distributed architecture with leader-follower replication
-- **Client Libraries**: Native clients for Go and Java with consistent APIs
-- **RESTful API**: HTTP API for interacting with the vault from any language
-- **Role-Based Access Control**: Define policies to restrict access based on roles
-- **Audit Logging**: Detailed logs of all access and changes to secrets
-- **High Availability**: Support for active/passive failover
-
-## System Requirements
-
-### Minimum Requirements
-
-- **CPU**: 2 cores
-- **Memory**: 2GB RAM
-- **Disk**: 1GB free space (plus space for secrets)
-- **Operating System**: Linux, macOS, or Windows
-
-### Software Requirements
-
-For building and running:
-- Go 1.20 or later
-- Git
-
-For Java client:
-- JDK 17 or later
-- Maven 3.6 or later
-
-For production use:
-- TLS certificates
-- Load balancer (for multi-node setup)
+- **Seal/Unseal** — Master key split via Shamir's Secret Sharing; vault starts sealed after every restart
+- **Encryption at Rest** — AES-256-GCM for all secrets, metadata, and tokens
+- **Policy-Based Access Control** — Path-based rules with `read`, `create`, `update`, `delete`, `list` capabilities
+- **Multi-Policy Tokens** — Compose fine-grained policies per service for cross-team secret sharing
+- **Secret Versioning** — Every write creates a new version; read any previous version or the latest
+- **Audit Logging** — Every operation recorded with timestamp, token, path, and result
+- **Leader-Follower Replication** — Write to the leader, read from any node
+- **Web UI** — Built-in browser interface at `/ui/` for managing secrets, policies, and tokens
+- **Rate Limiting** — Configurable token-bucket rate limiter
+- **Client Libraries** — Go, Java, Python, Rust
+- **Docker & Kubernetes** — Dockerfile, 3-node compose cluster, and K8s manifests included
 
 ## Quick Start
 
-### Building and Running
+```bash
+# Build
+go build -o bin/securevault ./cmd/server
+
+# Start
+./bin/securevault -config configs/dev-config.yaml &
+
+# Initialize (returns unseal keys + root token)
+curl -s -X POST http://127.0.0.1:8200/v1/sys/init \
+  -H "Content-Type: application/json" \
+  -d '{"secret_shares": 5, "secret_threshold": 3}'
+
+# Store your first secret
+curl -s -X POST http://127.0.0.1:8200/v1/secret/app/db/creds \
+  -H "X-Vault-Token: $ROOT_TOKEN" \
+  -d '{"data": {"username": "admin", "password": "s3cret"}}'
+
+# Read it back
+curl -s http://127.0.0.1:8200/v1/secret/app/db/creds \
+  -H "X-Vault-Token: $ROOT_TOKEN"
+
+# Open the Web UI
+open http://127.0.0.1:8200/ui/
+```
+
+> After initialization the vault is unsealed and ready. The unseal keys are needed after a **restart** — see [Seal/Unseal](#sealunseal).
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Clients
+        GO[Go Client]
+        JAVA[Java Client]
+        PY[Python Client]
+        RUST[Rust Client]
+        UI[Web UI]
+    end
+
+    subgraph Vaultrix Server
+        API[REST API<br/>Rate Limiter + TLS]
+        AUTH[Token Auth]
+        POLICY[Policy Engine]
+        SECRETS[Secret Manager<br/>Versioning]
+        AUDIT[Audit Logger]
+        SEAL[Seal Manager<br/>Shamir SSS]
+        REPL[Replication Engine]
+    end
+
+    subgraph Storage
+        FILE[File Backend<br/>AES-256-GCM]
+        PG[PostgreSQL Backend<br/>AES-256-GCM]
+    end
+
+    GO & JAVA & PY & RUST & UI -->|HTTP + X-Vault-Token| API
+    API --> AUTH --> POLICY --> SECRETS
+    SECRETS --> FILE & PG
+    SECRETS --> REPL
+    API --> AUDIT
+    SEAL -.->|encryption key| FILE & PG
+```
+
+```mermaid
+graph LR
+    subgraph Cluster
+        LEADER[Leader Node<br/>port 8200]
+        F1[Follower 1<br/>port 8210]
+        F2[Follower 2<br/>port 8220]
+    end
+
+    WRITES[Write Requests] --> LEADER
+    LEADER -->|Replicate| F1
+    LEADER -->|Replicate| F2
+    READS[Read Requests] --> F1 & F2
+```
+
+## System Requirements
+
+| Component | Minimum |
+|-----------|---------|
+| Go | 1.22+ |
+| Java (client) | 21+ |
+| Rust (client) | 1.70+ |
+| Python (client) | 3.9+ |
+| Docker (optional) | 20+ |
+
+## Seal/Unseal
+
+Vaultrix uses [Shamir's Secret Sharing](https://en.wikipedia.org/wiki/Shamir%27s_secret_sharing) to protect the master encryption key. On first run, you **initialize** the vault which generates key shares. After any restart, the vault is **sealed** and you must submit enough key shares to unseal it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Uninitialized
+    Uninitialized --> Unsealed: POST /v1/sys/init<br/>(returns keys + root token)
+    Unsealed --> Sealed: POST /v1/sys/seal<br/>or server restart
+    Sealed --> Unsealed: POST /v1/sys/unseal<br/>(submit threshold keys)
+    Sealed --> Sealed: All API calls return 503
+```
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/securevault.git
-cd securevault
+# Initialize (once)
+curl -X POST http://127.0.0.1:8200/v1/sys/init \
+  -d '{"secret_shares": 5, "secret_threshold": 3}'
 
-# Install dependencies
-go mod download
-
-# Build server and clients
-make build  # Or use the commands below
-
-# Build just the server
-go build -o bin/securevault cmd/server/main.go
-
-# Build the Go client
-go build -o bin/securevault-client clients/go/cmd/client/main.go
-
-# Start server with development config
-./bin/securevault server --config configs/dev-config.yaml
+# After restart — submit 3 of 5 keys
+curl -X POST http://127.0.0.1:8200/v1/sys/unseal -d '{"key": "key-1..."}'
+curl -X POST http://127.0.0.1:8200/v1/sys/unseal -d '{"key": "key-2..."}'
+curl -X POST http://127.0.0.1:8200/v1/sys/unseal -d '{"key": "key-3..."}'
+# → {"sealed": false}
 ```
 
-### Development Configuration Example
+## REST API
 
-Create a `dev-config.yaml` file:
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/sys/init` | Initialize vault |
+| `POST` | `/v1/sys/unseal` | Submit unseal key |
+| `POST` | `/v1/sys/seal` | Seal vault |
+| `GET` | `/v1/sys/seal-status` | Seal status |
+| `GET` | `/v1/health` | Health check |
+| `POST` | `/v1/secret/{path}` | Write secret |
+| `GET` | `/v1/secret/{path}` | Read latest version |
+| `GET` | `/v1/secret/versions/{v}/{path}` | Read specific version |
+| `DELETE` | `/v1/secret/{path}?destroy=true` | Delete secret |
+| `GET` | `/v1/secret/list/{path}` | List secrets |
+| `GET` | `/v1/secret/metadata/{path}` | Secret metadata |
+| `POST` | `/v1/auth/token/create` | Create token |
+| `GET` | `/v1/auth/token/lookup-self` | Lookup current token |
+| `POST` | `/v1/auth/token/renew-self` | Renew token |
+| `POST` | `/v1/auth/token/revoke-self` | Revoke token |
+| `POST` | `/v1/policies` | Create policy |
+| `GET` | `/v1/policies/{name}` | Get policy |
+| `PUT` | `/v1/policies/{name}` | Update policy |
+| `DELETE` | `/v1/policies/{name}` | Delete policy |
+| `GET` | `/v1/policies` | List policies |
+| `GET` | `/v1/audit/events` | Query audit log |
 
-```yaml
-server:
-  address: "127.0.0.1"
-  port: 8200
-  tls:
-    enabled: false  # Disable TLS for development
+## Client Libraries
 
-storage:
-  type: "file"
-  path: "./data"    # Local storage path
-
-auth:
-  token_ttl: "24h"  # Default token lifetime
-
-replication:
-  mode: "standalone"
-```
-
-### Create Your First Secret
-
-```bash
-# Get a token (in development mode, a root token is available)
-ROOT_TOKEN="root"  # Use an actual token in production
-
-# Create a secret
-curl -X POST \
-     -H "X-Vault-Token: $ROOT_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"username": "admin", "password": "secret123"}' \
-     http://127.0.0.1:8200/v1/secret/my-first-secret
-
-# Read the secret
-curl -H "X-Vault-Token: $ROOT_TOKEN" \
-     http://127.0.0.1:8200/v1/secret/my-first-secret
-
-# Create a policy
-curl -X POST \
-     -H "X-Vault-Token: $ROOT_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"policy": {"name": "app-readonly", "description": "Read-only access", "rules": [{"path": "secret/app/*", "capabilities": ["read", "list"]}]}}' \
-     http://127.0.0.1:8200/v1/policies
-```
-## Running the Server
-
-### Configuration
-
-Before running the server, you'll need a configuration file. A sample file is provided at `config.yaml`. 
-Review this file and adjust settings as needed:
-
-```yaml
-server:
-  address: "0.0.0.0"  # Listen on all interfaces
-  port: 8200         # Default port
-  tls:
-    enabled: true
-    cert_file: "/path/to/cert.pem"
-    key_file: "/path/to/key.pem"
-
-storage:
-  type: "file"        # Storage backend type
-  path: "/var/lib/securevault/data"
-
-auth:
-  token_ttl: "24h"    # Default token lifetime
-
-replication:
-  mode: "standalone"  # Replication mode
-```
-
-### Starting in Development Mode
-
-For development and testing, you can use a simplified configuration:
-
-```yaml
-# dev-config.yaml
-server:
-  address: "127.0.0.1"
-  port: 8200
-  tls:
-    enabled: false
-
-storage:
-  type: "file"
-  path: "./data"
-
-auth:
-  token_ttl: "24h"
-  enable_unauthenticated_token_creation: true  # For easy testing only
-
-replication:
-  mode: "standalone"
-```
-
-Then start the server:
-
-```bash
-./bin/securevault server --config dev-config.yaml
-```
-
-### Starting in Production Mode
-
-For production use, enable TLS and disable unauthenticated token creation:
-
-```bash
-./bin/securevault server --config prod-config.yaml
-```
-
-### Server Commands
-
-The server binary supports various commands:
-
-```bash
-# Start the server
-./bin/securevault server --config config.yaml
-
-# Create a token
-./bin/securevault token create --policy admin
-
-# Create a policy from file
-./bin/securevault policy create --file admin-policy.yaml
-
-# List policies
-./bin/securevault policy list
-
-# Show server status
-./bin/securevault status
-
-# Create backup
-./bin/securevault backup create --output backup.zip
-
-# Restore from backup
-./bin/securevault backup restore --input backup.zip
-```
-
-## Using the Go Client
-
-### Installation
-
-If you're using Go modules, add the client to your project:
-
-```bash
-go get github.com/yourusername/securevault/clients/go
-```
-
-### Basic Usage
+### Go
 
 ```go
-package main
+client, _ := securevault.NewClient("http://127.0.0.1:8200", rootToken)
 
-import (
-	"context"
-	"fmt"
-	"log"
-	"time"
-
-	"github.com/yourusername/securevault/clients/go"
-)
-
-func main() {
-	// Create a client with configuration options
-	client, err := securevault.NewClient(
-		"https://vault.example.com:8200",
-		"s.your-auth-token",
-		securevault.WithTimeout(10*time.Second),
-		securevault.WithMaxRetries(3),
-	)
-	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
-	}
-
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Write a secret
-	secretData := map[string]interface{}{
-		"username": "dbuser",
-		"password": "dbpass123",
-		"host":     "db.example.com",
-		"port":     5432,
-	}
-
-	err = client.WriteSecret(ctx, "database/credentials", secretData)
-	if err != nil {
-		log.Fatalf("Failed to write secret: %v", err)
-	}
-
-	// Read a secret
-	secret, err := client.ReadSecret(ctx, "database/credentials")
-	if err != nil {
-		log.Fatalf("Failed to read secret: %v", err)
-	}
-
-	fmt.Printf("Username: %s\n", secret.Data["username"])
-	fmt.Printf("Password: %s\n", secret.Data["password"])
-
-	// List secrets at a path
-	secrets, err := client.ListSecrets(ctx, "database")
-	if err != nil {
-		log.Fatalf("Failed to list secrets: %v", err)
-	}
-
-	fmt.Println("Available secrets:")
-	for _, s := range secrets {
-		fmt.Printf("- %s\n", s)
-	}
-
-	// Delete a secret
-	err = client.DeleteSecret(ctx, "database/credentials")
-	if err != nil {
-		log.Fatalf("Failed to delete secret: %v", err)
-	}
-}
-```
-
-### Error Handling
-
-The Go client provides helper functions to check specific error types:
-
-```go
-secret, err := client.ReadSecret(ctx, "database/credentials")
-if err != nil {
-    if securevault.IsNotFound(err) {
-        // Handle secret not found
-        log.Printf("Secret not found: %v", err)
-    } else if securevault.IsUnauthorized(err) {
-        // Handle authentication error
-        log.Printf("Not authorized: %v", err)
-    } else if securevault.IsForbidden(err) {
-        // Handle permission error
-        log.Printf("Permission denied: %v", err)
-    } else {
-        // Handle other errors
-        log.Fatalf("Error reading secret: %v", err)
-    }
-}
-}
-}
-```
-
-### Managing Policies with Go Client
-
-```go
-// Create a policy
-policy := &securevault.Policy{
-    Name:        "app-policy",
-    Description: "Policy for application access",
-    Rules: []securevault.PolicyRule{
-        {
-            Path:         "secret/app/*",
-            Capabilities: []string{"read", "list"},
-        },
-    },
-}
-
-err = client.CreatePolicy(ctx, policy)
-if err != nil {
-    log.Fatalf("Failed to create policy: %v", err)
-}
-
-// List policies
-policies, err := client.ListPolicies(ctx)
-if err != nil {
-    log.Fatalf("Failed to list policies: %v", err)
-}
-for _, p := range policies {
-    fmt.Println(p)
-}
-
-// Get a specific policy
-retrievedPolicy, err := client.GetPolicy(ctx, "app-policy")
-if err != nil {
-    log.Fatalf("Failed to get policy: %v", err)
-}
-fmt.Printf("Policy name: %s\n", retrievedPolicy.Name)
-fmt.Printf("Description: %s\n", retrievedPolicy.Description)
-
-// Update a policy
-retrievedPolicy.Rules = append(retrievedPolicy.Rules, securevault.PolicyRule{
-    Path:         "secret/app/logs/*",
-    Capabilities: []string{"read", "list"},
+// Write
+client.WriteSecret(ctx, "app/db/creds", map[string]interface{}{
+    "password": "s3cret",
 })
 
-err = client.UpdatePolicy(ctx, retrievedPolicy)
-if err != nil {
-    log.Fatalf("Failed to update policy: %v", err)
-}
+// Read
+secret, _ := client.ReadSecret(ctx, "app/db/creds")
+fmt.Println(secret.Data["password"])
 
-// Delete a policy
-err = client.DeletePolicy(ctx, "app-policy")
-if err != nil {
-    log.Fatalf("Failed to delete policy: %v", err)
-}
+// Read specific version
+v1, _ := client.ReadSecret(ctx, "app/db/creds", securevault.ReadOptions{Version: 1})
+
+// Seal/Unseal
+status, _ := client.GetSealStatus(ctx)
+client.Unseal(ctx, "unseal-key-hex...")
 ```
 
-## Permission Scenarios Examples
+### Java
 
-Vaultrix uses a path-based permission system with capabilities that determine what actions users can perform on specific paths. Here are some common scenarios:
+```java
+SecureVaultClient client = SecureVaultClient.builder()
+    .address("http://127.0.0.1:8200")
+    .token(rootToken)
+    .build();
 
-### Read-Only Access to Specific Path
+// Write
+client.writeSecret("app/db/creds", Map.of("password", "s3cret"));
 
-This policy gives read-only access to database credentials:
+// Read
+Map<String, Object> secret = client.readSecret("app/db/creds");
 
-```yaml
-name: "db-readonly"
-description: "Read-only access to database credentials"
-rules:
-  - path: "secret/database/*"
-    capabilities: ["read", "list"]
+// Create policy + token
+Policy policy = Policy.builder().name("reader").build();
+policy.addRule("app/**", List.of("read", "list"));
+client.createPolicy(policy);
+
+TokenResponse token = client.createToken(
+    TokenCreateOptions.builder()
+        .withPolicies(List.of("reader"))
+        .withTtl("8h")
+        .build());
 ```
 
-Usage example:
+### Python
+
+```python
+from securevault import SecureVaultClient
+
+client = SecureVaultClient("http://127.0.0.1:8200", root_token)
+
+client.write_secret("app/db/creds", {"password": "s3cret"})
+secret = client.read_secret("app/db/creds")
+print(secret.data["password"])
+```
+
+### Rust
+
+```rust
+use securevault_client::SecureVaultClient;
+
+let client = SecureVaultClient::new("http://127.0.0.1:8200", &root_token);
+
+let mut data = HashMap::new();
+data.insert("password".into(), json!("s3cret"));
+client.write_secret("app/db/creds", data)?;
+
+let secret = client.read_secret("app/db/creds")?;
+println!("{}", secret.data["password"]);
+```
+
+## Policies & Cross-Team Sharing
+
+Policies are composable building blocks. A token can have **multiple policies**, and its effective access is the **union** of all of them.
+
+```mermaid
+graph LR
+    subgraph Policies
+        P1[backend-service<br/>app/db/*, app/cache/*]
+        P2[payments-service<br/>app/api/*]
+        P3[shared-infra<br/>shared/logging/*, shared/messaging/*]
+        P4[auth-signing<br/>shared/auth/*]
+    end
+
+    subgraph Tokens
+        T1[Backend Token]
+        T2[Payments Token]
+    end
+
+    P1 --> T1
+    P3 --> T1
+    P2 --> T2
+    P3 --> T2
+    P4 --> T2
+```
 
 ```bash
-# Create a policy
-curl -X POST -H "X-Vault-Token: $ROOT_TOKEN" -d '{
-  "policy": {
-    "name": "db-readonly",
-    "description": "Read-only access to database credentials",
-    "rules": [
-      {
-        "path": "secret/database/*",
-        "capabilities": ["read", "list"]
-      }
-    ]
-  }
-}' http://127.0.0.1:8200/v1/policies
+# Create a shared policy
+curl -X POST http://127.0.0.1:8200/v1/policies \
+  -H "X-Vault-Token: $ROOT_TOKEN" \
+  -d '{"policy": {"name": "shared-infra", "rules": [
+    {"path": "shared/logging/*", "capabilities": ["read", "list"]},
+    {"path": "shared/messaging/*", "capabilities": ["read", "list"]}
+  ]}}'
 
-# Create a token with this policy
-RESTRICTED_TOKEN=$(curl -X POST -H "X-Vault-Token: $ROOT_TOKEN" -d '{
-  "policy_ids": ["db-readonly"],
-  "ttl": "1h"
-}' http://127.0.0.1:8200/v1/auth/token/create | jq -r '.auth.client_token')
-
-# This will succeed (read is allowed)
-curl -H "X-Vault-Token: $RESTRICTED_TOKEN" http://127.0.0.1:8200/v1/secret/database/postgres
-
-# This will fail (write is not allowed)
-curl -X POST -H "X-Vault-Token: $RESTRICTED_TOKEN" -d '{
-  "data": {"password": "newpassword"}
-}' http://127.0.0.1:8200/v1/secret/database/postgres
+# Create a token with multiple policies
+curl -X POST http://127.0.0.1:8200/v1/auth/token/create \
+  -H "X-Vault-Token: $ROOT_TOKEN" \
+  -d '{"policy_ids": ["backend-service", "shared-infra"], "ttl": "8h"}'
 ```
 
-### Application with Multiple Access Patterns
+### Path Patterns
 
-For an application that needs different access levels to different paths:
-
-```yaml
-name: "app-xyz-policy"
-description: "Access policy for App XYZ"
-rules:
-  - path: "secret/app/xyz/config/*"
-    capabilities: ["read", "list"]
-  - path: "secret/app/xyz/data/*"
-    capabilities: ["create", "read", "update", "delete", "list"]
-  - path: "secret/shared/*"
-    capabilities: ["read"]
-```
-
-### Admin Access to Specific Team Resources
-
-For team administrators:
-
-```yaml
-name: "team-a-admin"
-description: "Admin access to Team A resources"
-rules:
-  - path: "secret/teams/team-a/*"
-    capabilities: ["create", "read", "update", "delete", "list"]
-  - path: "policies/team-a-*"
-    capabilities: ["create", "read", "update", "delete", "list"]
-```
+| Pattern | Matches |
+|---------|---------|
+| `app/db/credentials` | Exactly that path |
+| `app/db/*` | One level under `app/db/` |
+| `app/**` | Everything under `app/` at any depth |
+| `*` | Everything (root/admin only) |
 
 ## Secret Versioning
 
-Vaultrix supports versioning of secrets, allowing you to track changes over time and roll back to previous versions if needed.
-
-### Working with Versions in the Go Client
-
-```go
-// Write multiple versions of a secret
-// Version 1
-client.WriteSecret(ctx, "api/keys", map[string]interface{}{
-    "api_key": "version1-key",
-})
-
-// Version 2
-client.WriteSecret(ctx, "api/keys", map[string]interface{}{
-    "api_key": "version2-key",
-})
-
-// Get the latest version (2)
-latest, err := client.ReadSecret(ctx, "api/keys")
-fmt.Println("Latest key:", latest.Data["api_key"])
-
-// Get a specific version (1)
-v1, err := client.ReadSecret(ctx, "api/keys", securevault.ReadOptions{
-    Version: 1,
-})
-fmt.Println("Version 1 key:", v1.Data["api_key"])
-
-// Get metadata with version history
-meta, err := client.GetSecretMetadata(ctx, "api/keys")
-fmt.Printf("Total versions: %d\n", len(meta.Versions))
-fmt.Printf("Current version: %d\n", meta.CurrentVersion)
-```
-
-### Working with Versions in the Java Client
-
-```java
-// Write multiple versions of a secret
-// Version 1
-Map<String, Object> v1Data = new HashMap<>();
-v1Data.put("api_key", "version1-key");
-client.writeSecret("api/keys", v1Data);
-
-// Version 2
-Map<String, Object> v2Data = new HashMap<>();
-v2Data.put("api_key", "version2-key");
-client.writeSecret("api/keys", v2Data);
-
-// Get the latest version (2)
-Secret latest = client.readSecret("api/keys");
-System.out.println("Latest key: " + latest.getData().get("api_key"));
-
-// Get a specific version (1)
-Secret v1 = client.readSecret("api/keys", ReadOptions.builder()
-        .version(1)
-        .build());
-System.out.println("Version 1 key: " + v1.getData().get("api_key"));
-
-// Get metadata with version history
-SecretMetadata meta = client.getSecretMetadata("api/keys");
-System.out.println("Total versions: " + meta.getVersions().size());
-System.out.println("Current version: " + meta.getCurrentVersion());
-```
-
-### Version Deletion
-
-You can delete specific versions of a secret:
-
-```go
-// Go: Delete version 1
-client.DeleteSecret(ctx, "api/keys", securevault.DeleteOptions{
-    Versions: []int{1},
-})
-```
-
-```java
-// Java: Delete version 1
-client.deleteSecret("api/keys", DeleteOptions.builder()
-        .versions(Collections.singletonList(1))
-        .build());
-```
-
-For permanent deletion, set the `Destroy` flag:
-
-```go
-// Go: Permanently delete all versions
-client.DeleteSecret(ctx, "api/keys", securevault.DeleteOptions{
-    Destroy: true,
-})
-```
-
-```java
-// Java: Permanently delete all versions
-client.deleteSecret("api/keys", DeleteOptions.builder()
-        .destroy(true)
-        .build());
-```
-
-## Using the Python Client
-
-### Installation
-
-Using pip:
+Every write to the same path creates a new version. Previous versions are preserved.
 
 ```bash
-pip install securevault-client
+# Write v1
+curl -X POST .../v1/secret/app/key -d '{"data": {"val": "one"}}'
+# Write v2
+curl -X POST .../v1/secret/app/key -d '{"data": {"val": "two"}}'
+
+# Read latest → v2
+curl .../v1/secret/app/key
+# Read v1
+curl .../v1/secret/versions/1/app/key
+# Metadata
+curl .../v1/secret/metadata/app/key
+# → {"current_version": 2, "versions": {"1": {...}, "2": {...}}}
 ```
 
-Using pip with a specific version:
+## Docker
 
 ```bash
-pip install securevault-client==0.1.0
+# Single node
+docker build -t vaultrix .
+docker run -p 8200:8200 vaultrix
+
+# 3-node cluster
+docker compose -f docker-compose.cluster.yml up --build
 ```
 
-From source:
+## Kubernetes
 
 ```bash
-git clone https://github.com/yourusername/securevault.git
-cd securevault/clients/python
-pip install -e .
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f deploy/k8s/configmap.yaml
+kubectl apply -f deploy/k8s/leader.yaml
+kubectl apply -f deploy/k8s/followers.yaml
 ```
 
-### Basic Usage
+## Replication
 
-```python
-import asyncio
-from securevault import SecureVaultClient, WriteOptions, ReadOptions, DeleteOptions
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Leader
+    participant Follower1
+    participant Follower2
 
-# Create a client
-client = SecureVaultClient(
-    url="https://vault.example.com:8200",
-    token="s.your-auth-token",
-    timeout=10,
-    max_retries=3
-)
+    Client->>Leader: POST /v1/secret/app/key
+    Leader->>Leader: Encrypt & store
+    Leader->>Follower1: Replicate (authenticated)
+    Leader->>Follower2: Replicate (authenticated)
+    Follower1-->>Leader: ACK
+    Follower2-->>Leader: ACK
+    Leader-->>Client: 204 No Content
 
-# Write a secret
-client.write_secret(
-    path="database/credentials",
-    data={
-        "username": "dbuser",
-        "password": "dbpass123",
-        "host": "db.example.com",
-        "port": 5432
-    }
-)
-
-# Read a secret
-secret = client.read_secret("database/credentials")
-print(f"Username: {secret.data['username']}")
-print(f"Password: {secret.data['password']}")
-
-# List secrets
-secrets = client.list_secrets("database")
-print("Available secrets:")
-for s in secrets:
-    print(f"- {s}")
-
-# Delete a secret
-client.delete_secret("database/credentials")
-
-# Using a context manager for automatic cleanup
-with SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token") as client:
-    client.write_secret("app/config", {"api_key": "my-api-key"})
-    secret = client.read_secret("app/config")
-    print(f"API Key: {secret.data['api_key']}")
+    Client->>Follower1: GET /v1/secret/app/key
+    Follower1-->>Client: {"data": {...}}
 ```
 
-### Async Support
-
-The Python client also provides asynchronous support:
-
-```python
-import asyncio
-from securevault import AsyncSecureVaultClient
-
-async def main():
-    # Create async client
-    async with AsyncSecureVaultClient(
-        url="https://vault.example.com:8200",
-        token="s.your-auth-token"
-    ) as client:
-        # Write a secret
-        await client.write_secret(
-            path="database/credentials",
-            data={"username": "dbuser", "password": "dbpass123"}
-        )
-        
-        # Read a secret
-        secret = await client.read_secret("database/credentials")
-        print(f"Username: {secret.data['username']}")
-        
-        # List secrets
-        secrets = await client.list_secrets("database")
-        print("Available secrets:", secrets)
-
-# Run the async function
-asyncio.run(main())
-```
-
-### Error Handling
-
-The Python client provides detailed error types for different failure scenarios:
-
-```python
-from securevault import (
-    SecureVaultClient,
-    SecureVaultConnectionError,
-    SecureVaultAuthenticationError,
-    SecureVaultForbiddenError,
-    SecureVaultNotFoundError
-)
-
-try:
-    client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
-    secret = client.read_secret("database/credentials")
-    # Process the secret
-except SecureVaultNotFoundError:
-    print("Secret not found")
-except SecureVaultAuthenticationError:
-    print("Authentication failed - check your token")
-except SecureVaultForbiddenError:
-    print("Permission denied - check your token's policy")
-except SecureVaultConnectionError as e:
-    print(f"Connection error: {e}")
-except Exception as e:
-    print(f"Unexpected error: {e}")
-```
-
-### Managing Policies with Python Client
-
-```python
-from securevault import SecureVaultClient, Policy, PolicyRule
-
-# Create a policy
-policy = Policy(
-    name="app-policy",
-    description="Policy for application access",
-    rules=[
-        PolicyRule(
-            path="secret/app/*",
-            capabilities=["read", "list"]
-        )
-    ]
-)
-
-client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
-client.create_policy(policy)
-
-# List policies
-policies = client.list_policies()
-for p in policies:
-    print(p)
-
-# Get a specific policy
-retrieved_policy = client.get_policy("app-policy")
-print(f"Policy name: {retrieved_policy.name}")
-print(f"Description: {retrieved_policy.description}")
-
-# Update a policy
-retrieved_policy.rules.append(
-    PolicyRule(
-        path="secret/app/logs/*",
-        capabilities=["read", "list"]
-    )
-)
-client.update_policy(retrieved_policy)
-
-# Delete a policy
-client.delete_policy("app-policy")
-```
-
-### Working with Secret Versions
-
-```python
-from securevault import SecureVaultClient, ReadOptions, DeleteOptions
-
-client = SecureVaultClient("https://vault.example.com:8200", "s.your-auth-token")
-
-# Write multiple versions of a secret
-# Version 1
-client.write_secret("api/keys", {"api_key": "version1-key"})
-
-# Version 2
-client.write_secret("api/keys", {"api_key": "version2-key"})
-
-# Get latest version (2)
-latest = client.read_secret("api/keys")
-print(f"Latest key: {latest.data['api_key']}")
-
-# Get specific version (1)
-v1 = client.read_secret("api/keys", ReadOptions(version=1))
-print(f"Version 1 key: {v1.data['api_key']}")
-
-# Get metadata with version history
-metadata = client.get_secret_metadata("api/keys")
-print(f"Total versions: {len(metadata.versions)}")
-print(f"Current version: {metadata.current_version}")
-
-# Delete specific version
-client.delete_secret("api/keys", DeleteOptions(versions=[1]))
-
-# Permanently delete all versions
-client.delete_secret("api/keys", DeleteOptions(destroy=True))
-```
-
-## Replication Setup
-
-Vaultrix supports a leader-follower replication model for high availability and improved read performance. In this model:
-
-- The **leader** node accepts write operations and replicates changes to followers
-- **Follower** nodes serve read operations and receive updates from the leader
-- All nodes participate in the cluster for high availability
-
-### Replication Architecture
-
-```
-    Write Requests                 Read Requests
-         ↓                          ↓   ↓   ↓
-    +---------+     Replication    +---------+
-    |         |-------------------→|         |
-    |  Leader |-------------------→| Follower|
-    |         |-------------------→|         |
-    +---------+                    +---------+
-         ↑                              ↑
-    +---------+                    +---------+
-    |Storage  |                    |Storage  |
-    +---------+                    +---------+
-```
-
-### Configuring a Leader Node
-
-Create a leader configuration file:
+Configure in `config.yaml`:
 
 ```yaml
-# leader-config.yaml
-server:
-  address: "0.0.0.0"
-  port: 8200
-  tls:
-    enabled: true
-    cert_file: "/path/to/cert.pem"
-    key_file: "/path/to/key.pem"
-
-storage:
-  type: "file"
-  path: "/var/lib/securevault/data"
-
-auth:
-  token_ttl: "24h"
-
 replication:
-  mode: "leader"
-  cluster_addr: "10.0.1.10:8201"  # Replication endpoint
-  consistency: "strong"           # or "eventual"
-  peers:                          # List of follower nodes
+  mode: "leader"          # or "follower"
+  cluster_addr: "10.0.1.10:8201"
+  peers:
     - "10.0.1.11:8201"
     - "10.0.1.12:8201"
+  shared_secret: "change-me"   # authenticates replication traffic
 ```
 
-Start the leader node:
+## Testing
 
 ```bash
-./bin/securevault server --config leader-config.yaml
+# Unit tests (all packages)
+go test ./pkg/... -count=1
+
+# Including 3-node replication test
+go test ./pkg/server/ -run TestThreeNodeReplication -v
+
+# Build and run all examples (REST, Go, Python, Java)
+bash examples/run-all-examples.sh
+
+# Docker 3-node cluster test
+bash deploy/test-cluster.sh
 ```
 
-### Configuring a Follower Node
+## Web UI
 
-Create a follower configuration file:
+The web UI is served at `/ui/` and embedded in the binary — no separate build step.
 
-```yaml
-# follower-config.yaml
-server:
-  address: "0.0.0.0"
-  port: 8200
-  tls:
-    enabled: true
-    cert_file: "/path/to/cert.pem"
-    key_file: "/path/to/key.pem"
+- Login with any token (root or restricted)
+- Browse secrets hierarchically, view/edit key-value pairs
+- Create and manage policies and tokens
+- View audit log
+- Seal/unseal controls
 
-storage:
-  type: "file"
-  path: "/var/lib/securevault/data"
+Restricted tokens see an "Access Denied" at root — type the path they have access to (e.g., `app/db`) in the search box.
 
-auth:
-  token_ttl: "24h"
+## Walkthrough
 
-replication:
-  mode: "follower"
-  cluster_addr: "10.0.1.11:8201"  # Replication endpoint
-  peers:                          # Leader node address
-    - "10.0.1.10:8201"
-```
+See [`examples/walkthrough/`](examples/walkthrough/README.md) for a complete end-to-end guide covering:
 
-Start the follower node:
+1. **Initial setup** — initialize, unseal, distribute keys
+2. **Admin creates secrets & policies** — store secrets, create composable policies, generate multi-policy tokens
+3. **Developer uses secrets** — via UI, curl, or client library
+4. **Request access to a shared secret** — developer asks admin, admin adds policy to token
+5. **Self-service secret management** — team leads create/rotate secrets under their path
+6. **After a restart** — key holders unseal the vault
 
-```bash
-./bin/securevault server --config follower-config.yaml
-```
-
-### Replication Verification
-
-To verify replication is working correctly:
-
-1. Create a secret on the leader node
-2. Verify the secret is available on follower nodes (after replication)
-3. Check replication status via the API or CLI
-
-```bash
-# Check replication status
-curl -H "X-Vault-Token: $TOKEN" http://leader-ip:8200/v1/sys/replication/status
-
-# From CLI
-./bin/securevault status replication
-```
-
-### Replication Consistency
-
-Vaultrix provides two consistency modes:
-
-1. **Strong consistency**: Ensures changes are replicated to all followers before confirming writes
-2. **Eventual consistency**: Faster performance, but followers may temporarily serve stale data
-
-Configure this in the `replication.consistency` setting.
-
-## Security Considerations
-
-### TLS Configuration
-
-Always use TLS in production environments:
-
-```yaml
-server:
-  # ...
-  tls:
-    enabled: true
-    cert_file: "/path/to/cert.pem"
-    key_file: "/path/to/key.pem"
-```
-
-Use strong cipher suites and TLS 1.2+ for secure communication.
-
-### Token Security
-
-- Use short-lived tokens with appropriate TTLs
-- Never store tokens in source code or unencrypted configuration files
-- Use environment variables or secure credential managers to provide tokens to applications
-- Implement token rotation policies
-
-### Network Security
-
-- Place Vaultrix servers in a private network segment
-- Use firewalls to restrict access to the API endpoints
-- Configure a load balancer with WAF protection for public-facing endpoints
-- Consider using a VPN for administrative access
-
-### Secure Storage
-
-For production environments:
-
-- Use encrypted filesystems for file-based storage
-- For database storage, enable TLS/SSL connections and encryption-at-rest
-- Limit database access to the vault server only
-
-### Least Privilege Access
-
-- Create specific policies for different applications and users
-- Grant minimal permissions required for each user/application
-- Regularly audit and review access policies
-
-Example of a minimal policy for an application:
-
-```yaml
-name: "app-xyz-db-access"
-description: "Policy for App XYZ database access"
-rules:
-  - path: "secret/database/xyz/*"
-    capabilities: ["read"]
-  - path: "secret/app/xyz/*"
-    capabilities: ["read", "list"]
-```
-
-### Security Hardening Checklist
-
-- [ ] Enable TLS with strong ciphers
-- [ ] Use short-lived tokens with minimal permissions
-- [ ] Place servers in a secure network segment
-- [ ] Enable audit logging
-- [ ] Implement infrastructure firewall rules
-- [ ] Use encrypted storage for secrets
-- [ ] Regular security patches for OS and dependencies
-- [ ] Implement IP-based access controls
-- [ ] Set up monitoring and alerting
-
-## Backup and Recovery
-
-### Backup Types
-
-Vaultrix supports two types of backups:
-
-1. **Snapshot backups**: Complete point-in-time backup of all secrets and configuration
-2. **Incremental backups**: Backup of changes since the last snapshot
-
-### Creating a Snapshot Backup
-
-```bash
-# CLI command
-./bin/securevault backup create --output /path/to/backup/vault-backup.snap
-
-# API request
-curl -X POST -H "X-Vault-Token: $TOKEN" \
-     http://127.0.0.1:8200/v1/sys/backup/snapshot \
-     -o vault-backup.snap
-```
-
-### Restoring from a Backup
-
-**Important**: Restoring will overwrite existing data. Ensure the service is stopped before restoring.
-
-```bash
-# Stop the service
-systemctl stop securevault
-
-# CLI command
-./bin/securevault backup restore --input /path/to/backup/vault-backup.snap
-
-# Restart the service
-systemctl start securevault
-```
-
-### Backup Best Practices
-
-1. **Regular Schedule**: Implement automated backup schedules
-2. **Secure Storage**: Store backups in an encrypted, off-site location
-3. **Rotation**: Maintain multiple backup generations
-4. **Testing**: Regularly test restore procedures
-5. **Auditing**: Keep records of backup/restore operations
-
-### Storage Backend Backups
-
-In addition to the snapshot functionality, you should also back up the underlying storage:
-
-- **File backend**: Copy the data directory
-- **Database backends**: Use database backup tools (e.g., pg_dump for PostgreSQL)
-
-## Troubleshooting
-
-### Common Issues
-
-#### Connection Refused
-
-**Symptoms**: Client cannot connect to the server, receiving "connection refused" errors.
-
-**Solutions**:
-
-1. Verify the server is running:
-   ```bash
-   ps aux | grep securevault
-   ```
-
-2. Check listening address and port:
-   ```bash
-   netstat -tlnp | grep 8200
-   ```
-
-3. Check firewall rules:
-   ```bash
-   sudo iptables -L | grep 8200
-   ```
-
-#### Authentication Failures
-
-**Symptoms**: Receiving "permission denied" or "invalid token" errors.
-
-**Solutions**:
-
-1. Verify token is correct:
-   ```bash
-   curl -H "X-Vault-Token: $TOKEN" http://127.0.0.1:8200/v1/auth/token/lookup-self
-   ```
-
-2. Check if token has expired or is revoked
-3. Ensure token has appropriate policies attached
-
-#### Replication Issues
-
-**Symptoms**: Changes on leader not appearing on followers, replication lag.
-
-**Solutions**:
-
-1. Check replication status:
-   ```bash
-   ./bin/securevault status replication
-   ```
-
-2. Verify network connectivity between nodes
-3. Check replication logs for errors
-4. Try restarting the follower node
-## Architecture
-
-Vaultrix's architecture consists of several core components working together to provide secure secret management:
-
-### System Diagram
+## Project Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│                     Vaultrix System                             │
-│                                                                 │
-│  ┌───────────┐     ┌──────────────────────────────────────┐    │
-│  │           │     │            Server (Go)               │    │
-│  │           │     │  ┌────────────┐    ┌──────────────┐  │    │
-│  │  Clients  │━━━━━┿━▶│API Gateway │━━━▶│Authentication│  │    │
-│  │           │     │  └─────┬──────┘    └──────┬───────┘  │    │
-│  │           │     │        │                  │          │    │
-│  └───────────┘     │        ▼                  ▼          │    │
-│                    │  ┌────────────┐    ┌──────────────┐  │    │
-│                    │  │   Policy   │◀━━━┿━▶    Secret   │  │    │
-│                    │  │Enforcement │    │  Management  │  │    │
-│                    │  └─────┬──────┘    └──────┬───────┘  │    │
-│                    │        │                  │          │    │
-│                    │        ├──────────────────┘          │    │
-│                    │        ▼                             │    │
-│                    │  ┌────────────┐      ┌────────────┐  │    │
-│                    │  │ Replication│━━━━━▶│   Storage   │  │    │
-│                    │  │   Engine   │      │   Backend   │  │    │
-│                    │  └────────────┘      └────────────┘  │    │
-│                    │                                      │    │
-│                    └──────────────────────────────────────┘    │
-│                                                                │
-└─────────────────────────────────────────────────────────────────┘
+cmd/server/          Server entry point
+pkg/
+  server/            HTTP handlers, auth, replication
+  storage/           File + PostgreSQL backends (encrypted)
+  policy/            Policy engine with path matching
+  seal/              Shamir's Secret Sharing + seal manager
+  audit/             Audit logger
+  errors/            Typed error system
+  ui/                Embedded web UI
+clients/
+  go/                Go client library
+  java/              Java client (Maven)
+  python/            Python client (sync + async)
+  rust/              Rust client (reqwest + serde)
+examples/
+  walkthrough/       End-to-end guide with bash + Java
+  go/                Go client example
+  python/            Python client example
+  rust/              Rust client example
+deploy/
+  configs/           Docker cluster configs
+  k8s/               Kubernetes manifests
+  test-cluster.sh    3-node Docker replication test
 ```
 
-### Core Components
+## Security Notes
 
-1. **API Gateway**: Handles HTTP requests, enforces TLS, and routes to appropriate services
-2. **Authentication Service**: Verifies tokens and credentials
-3. **Policy Enforcement**: Applies access control rules based on paths and capabilities
-4. **Secret Management**: Handles CRUD operations for secrets and versioning
-5. **Replication Engine**: Synchronizes data across nodes in a cluster
-6. **Storage Backend**: Persists encrypted secrets using one of several options:
-   - File Storage: Local encrypted file storage
-   - Database Storage: MySQL, PostgreSQL storage options
-   - Encryption Layer: AES-256-GCM encryption for all secrets
-7. **Clients**: Native implementations for different languages
-   - Go Client
-   - Java Client
-
-### Data Flow
-
-1. Clients authenticate with the server using tokens
-2. API Gateway validates requests and forwards to appropriate internal service
-3. Authentication Service validates tokens and permissions
-4. Policy Enforcement checks access permissions for the requested operation
-5. Secret Management handles the actual secret operations
-6. Storage Backend securely persists the data
-7. Replication Engine ensures changes are propagated to follower nodes
-
-### Security Design
-
-* **Encryption in Transit**: TLS for all communications
-* **Encryption at Rest**: AES-256-GCM for all stored secrets
-* **Token-based Authentication**: Short-lived access tokens bound to policies
-* **Policy-based Authorization**: Fine-grained access control rules
-* **Audit Logging**: Detailed logging of all operations for compliance
-## Contributing
-
-Contributions to Vaultrix are welcome! This section outlines the process for contributing to the project and guidelines to follow.
-
-### Development Prerequisites
-
-* Go 1.20+
-* JDK 17+ (for Java client)
-* Git
-* Docker (recommended for integration testing)
-
-### Getting Started
-
-1. Fork the repository on GitHub
-2. Clone your fork locally:
-   ```bash
-   git clone https://github.com/YOUR-USERNAME/securevault.git
-   cd securevault
-   ```
-3. Add the original repository as upstream:
-   ```bash
-   git remote add upstream https://github.com/original-owner/securevault.git
-   ```
-4. Create a new branch for your changes:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-### Code Style Guidelines
-
-#### Go Code
-
-* Follow the [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
-* Use `gofmt` to format your code before committing
-* Run `golint` and `go vet` to catch common issues
-* Add tests for new functionality
-* Aim for at least 80% test coverage for new code
-
-```bash
-# Format code
-gofmt -s -w .
-
-# Run linter
-golint ./...
-
-# Run static analysis
-go vet ./...
-
-# Run tests with coverage
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-#### Java Code
-
-* Follow the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html)
-* Use Maven's formatter plugin for consistent formatting
-* Add JavaDoc comments for all public methods and classes
-* Write JUnit tests for new functionality
-
-```bash
-# Format code
-cd clients/java
-mvn formatter:format
-
-# Run tests
-mvn test
-```
-
-### Pull Request Process
-
-1. Update the documentation (README.md, etc.) with details of your changes
-2. Run all tests and ensure they pass
-3. Update any examples to reflect your changes if needed
-4. Submit a pull request against the `main` branch of the original repository
-5. The PR should clearly describe the problem and solution
-6. Ensure all CI checks pass on your PR
-
-### Code Review
-
-* All submissions require review by at least one project maintainer
-* Maintainers may request changes before merging
-* Be responsive to feedback and be prepared to make requested changes
-
-### Commit Messages
-
-Follow these guidelines for commit messages:
-
-* Use the present tense ("Add feature" not "Added feature")
-* Use the imperative mood ("Move cursor to..." not "Moves cursor to...")
-* Limit the first line to 72 characters or less
-* Reference issues and pull requests after the first line
-
-Example:
-```
-Add Java client support for secret versioning
-
-- Implement version-aware read operations
-- Add metadata retrieval for versions
-- Update documentation with examples
-
-Fixes #123
-```
-
-### Testing Guidelines
-
-* Write unit tests for all new code
-* Write integration tests for API endpoints
-* Set up local test environment using Docker for integration tests
-* Mock external dependencies in unit tests
-
-### Licensing
-
-By contributing to Vaultrix, you agree that your contributions will be licensed under the project's MIT License.
+- Unseal keys and root tokens are shown **once** during initialization — save them securely
+- Revoke the root token after initial setup; use policy-scoped tokens for daily operations
+- Enable TLS in production (`server.tls.enabled: true`)
+- Enable audit logging (`audit.enabled: true`)
+- Use short TTLs on tokens and renew programmatically
+- Inject tokens via environment variables — never hardcode
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+MIT

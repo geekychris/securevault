@@ -15,47 +15,73 @@ This walkthrough demonstrates the complete workflow a team would use with Vaultr
 
 ## Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                        Vaultrix Server                          │
-│                                                                    │
-│  ┌─────────────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │      Secrets         │  │   Policies    │  │     Tokens        │  │
-│  │                      │  │               │  │                   │  │
-│  │  app/db/*      ──────┼──│ backend-svc   │  │ backend token     │  │
-│  │  app/api/*     ──────┼──│ payments-svc  │  │  = backend-svc    │  │
-│  │  app/cache/*         │  │               │  │  + shared-infra   │  │
-│  │                      │  │ shared-infra ─┼──│                   │  │
-│  │  shared/logging/* ───┼──│  (cross-team) │  │ payments token    │  │
-│  │  shared/messaging/*  │  │               │  │  = payments-svc   │  │
-│  │  shared/auth/*  ─────┼──│ auth-signing  │  │  + shared-infra   │  │
-│  │                      │  │               │  │  + auth-signing   │  │
-│  │                      │  │ devops-admin  │  │                   │  │
-│  └─────────────────────┘  └──────────────┘  └──────────────────┘  │
-└────────────────────────────────────────────────────────────────────┘
-     ▲          ▲          ▲                │
-     │          │          │                │
-  Backend   Payments    DevOps           Admin
-  (2 policies) (3 policies) (1 policy)
+```mermaid
+graph TB
+    subgraph Secrets
+        S1[app/db/*]
+        S2[app/api/*]
+        S3[app/cache/*]
+        S4[shared/logging/*]
+        S5[shared/messaging/*]
+        S6[shared/auth/*]
+    end
+
+    subgraph Policies
+        P1[backend-service]
+        P2[payments-service]
+        P3[shared-infra]
+        P4[auth-signing]
+        P5[devops-admin]
+    end
+
+    subgraph Tokens
+        T1["Backend Token<br/>(2 policies)"]
+        T2["Payments Token<br/>(3 policies)"]
+        T3["DevOps Token<br/>(1 policy)"]
+    end
+
+    S1 & S3 --> P1
+    S2 --> P2
+    S4 & S5 --> P3
+    S6 --> P4
+
+    P1 & P3 --> T1
+    P2 & P3 & P4 --> T2
+    P5 --> T3
+
+    ADMIN[Admin] -->|creates| Secrets & Policies & Tokens
+    T1 --> BACKEND[Backend Service]
+    T2 --> PAYMENTS[Payments Service]
+    T3 --> DEVOPS[DevOps Team]
 ```
 
 ### How cross-team sharing works
 
 Policies are **composable building blocks**. A token can have **multiple policies** attached, and its effective access is the **union** of all of them.
 
-```
-backend token policies:   [backend-service, shared-infra]
-                           ├── app/db/*        (from backend-service)
-                           ├── app/cache/*     (from backend-service)
-                           ├── shared/logging/*   (from shared-infra)
-                           └── shared/messaging/* (from shared-infra)
+```mermaid
+graph LR
+    subgraph "Backend Token = backend-service + shared-infra"
+        B1[app/db/*]
+        B2[app/cache/*]
+        B3[shared/logging/*]
+        B4[shared/messaging/*]
+    end
 
-payments token policies:  [payments-service, shared-infra, auth-signing]
-                           ├── app/api/*          (from payments-service)
-                           ├── shared/logging/*   (from shared-infra)  ← SAME as backend
-                           ├── shared/messaging/* (from shared-infra)  ← SAME as backend
-                           └── shared/auth/*      (from auth-signing)
+    subgraph "Payments Token = payments-service + shared-infra + auth-signing"
+        P1[app/api/*]
+        P2[shared/logging/*]
+        P3[shared/messaging/*]
+        P4[shared/auth/*]
+    end
+
+    style B3 fill:#1b4332,stroke:#52b788
+    style B4 fill:#1b4332,stroke:#52b788
+    style P2 fill:#1b4332,stroke:#52b788
+    style P3 fill:#1b4332,stroke:#52b788
 ```
+
+Both services can read `shared/logging/*` and `shared/messaging/*` (green) because both tokens include the `shared-infra` policy. But only payments can read `shared/auth/*` because only its token includes `auth-signing`.
 
 Both services can read `shared/logging/datadog` because both tokens include `shared-infra`. But only payments can read `shared/auth/jwt-signing` because only its token includes `auth-signing`.
 
