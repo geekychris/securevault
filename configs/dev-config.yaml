@@ -6,10 +6,21 @@ server:
 
 storage:
   type: "file"
-  path: "./data"    # Local storage path
+  path: "./data"
 
 auth:
-  token_ttl: "24h"  # Default token lifetime
+  token_ttl: "24h"
+
+seal:
+  secret_shares: 1       # Single key for easy dev workflow
+  secret_threshold: 1
+
+rate_limit:
+  enabled: false          # Disable rate limiting in dev
+
+audit:
+  enabled: true
+  path: "./data/audit/audit.log"
 
 replication:
   mode: "standalone"

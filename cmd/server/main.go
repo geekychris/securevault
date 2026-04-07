@@ -13,23 +13,19 @@ import (
 )
 
 func main() {
-	// Parse command line flags
 	configFile := flag.String("config", "config.yaml", "Path to configuration file")
 	flag.Parse()
 
-	// Load configuration
 	config, err := server.LoadConfig(*configFile)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Create and initialize server
 	srv, err := server.NewServer(config)
 	if err != nil {
 		log.Fatalf("Failed to initialize server: %v", err)
 	}
 
-	// Start the server in a goroutine
 	go func() {
 		if err := srv.Start(); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
@@ -38,14 +34,22 @@ func main() {
 
 	log.Printf("SecureVault server started on %s:%d", config.Server.Address, config.Server.Port)
 
-	// Set up graceful shutdown
+	if srv.SealManager().IsInitialized() {
+		if srv.SealManager().IsSealed() {
+			log.Println("Vault is SEALED. Submit unseal keys via POST /v1/sys/unseal")
+		} else {
+			log.Println("Vault is UNSEALED and ready to accept requests")
+		}
+	} else {
+		log.Println("Vault is NOT INITIALIZED. Initialize via POST /v1/sys/init")
+	}
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down server...")
 
-	// Create a deadline to wait for current operations to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -55,4 +59,3 @@ func main() {
 
 	log.Println("Server exited properly")
 }
-

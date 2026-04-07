@@ -392,7 +392,7 @@ func (c *Client) ReadSecret(ctx context.Context, path string, options ...ReadOpt
 	// Build URL
 	url := "/v1/secret/" + path
 	if opts.Version > 0 {
-		url = fmt.Sprintf("/v1/secret/%s/versions/%d", path, opts.Version)
+		url = fmt.Sprintf("/v1/secret/versions/%d/%s", opts.Version, path)
 	}
 
 	// Make request
@@ -447,22 +447,8 @@ func (c *Client) DeleteSecret(ctx context.Context, path string, options ...Delet
 
 // ListSecrets lists secrets under a path
 func (c *Client) ListSecrets(ctx context.Context, path string, options ...ListOptions) ([]string, error) {
-	// Process options
-	var opts ListOptions
-	if len(options) > 0 {
-		opts = options[0]
-	}
-
-	// Normalize path
-	if !strings.HasSuffix(path, "/") && path != "" {
-		path += "/"
-	}
-
-	// Build URL with query parameters
-	url := "/v1/secret/" + path + "?list=true"
-	if opts.Recursive {
-		url += "&recursive=true"
-	}
+	// Build URL
+	url := "/v1/secret/list/" + path
 
 	// Make request
 	responseBody, err := c.doRequest(ctx, http.MethodGet, url, nil)
@@ -484,7 +470,7 @@ func (c *Client) ListSecrets(ctx context.Context, path string, options ...ListOp
 // GetSecretMetadata gets metadata about a secret
 func (c *Client) GetSecretMetadata(ctx context.Context, path string) (*SecretMetadata, error) {
 	// Make request
-	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/secret/"+path+"/metadata", nil)
+	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/secret/metadata/"+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -500,8 +486,11 @@ func (c *Client) GetSecretMetadata(ctx context.Context, path string) (*SecretMet
 
 // CreatePolicy creates a new policy
 func (c *Client) CreatePolicy(ctx context.Context, policy *Policy) error {
-	// Make request
-	_, err := c.doRequest(ctx, http.MethodPost, "/v1/policies", policy)
+	// Server expects {"policy": {...}}
+	body := map[string]interface{}{
+		"policy": policy,
+	}
+	_, err := c.doRequest(ctx, http.MethodPost, "/v1/policies", body)
 	return err
 }
 
@@ -524,8 +513,10 @@ func (c *Client) GetPolicy(ctx context.Context, name string) (*Policy, error) {
 
 // UpdatePolicy updates an existing policy
 func (c *Client) UpdatePolicy(ctx context.Context, policy *Policy) error {
-	// Make request
-	_, err := c.doRequest(ctx, http.MethodPut, "/v1/policies/"+policy.Name, policy)
+	body := map[string]interface{}{
+		"policy": policy,
+	}
+	_, err := c.doRequest(ctx, http.MethodPut, "/v1/policies/"+policy.Name, body)
 	return err
 }
 
@@ -563,15 +554,17 @@ func (c *Client) CreateToken(ctx context.Context, options TokenOptions) (string,
 		return "", err
 	}
 
-	// Parse response
+	// Parse response — server returns {"auth": {"client_token": "..."}}
 	var response struct {
-		Token string `json:"token"`
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
 	}
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return "", fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	return response.Token, nil
+	return response.Auth.ClientToken, nil
 }
 
 // SetToken updates the token used by the client
@@ -579,4 +572,126 @@ func (c *Client) SetToken(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = token
+}
+
+// SealStatus represents the vault's seal status
+type SealStatus struct {
+	Sealed      bool   `json:"sealed"`
+	Threshold   int    `json:"threshold"`
+	NumShares   int    `json:"num_shares"`
+	Progress    int    `json:"progress"`
+	Initialized bool   `json:"initialized"`
+	ClusterName string `json:"cluster_name,omitempty"`
+}
+
+// InitResponse is returned when the vault is initialized
+type InitResponse struct {
+	Keys      []string `json:"keys"`
+	RootToken string   `json:"root_token"`
+}
+
+// GetSealStatus gets the vault's seal status
+func (c *Client) GetSealStatus(ctx context.Context) (*SealStatus, error) {
+	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/sys/seal-status", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var status SealStatus
+	if err := json.Unmarshal(responseBody, &status); err != nil {
+		return nil, fmt.Errorf("failed to parse seal status: %w", err)
+	}
+
+	return &status, nil
+}
+
+// Initialize initializes the vault with the specified number of key shares and threshold
+func (c *Client) Initialize(ctx context.Context, secretShares, secretThreshold int) (*InitResponse, error) {
+	req := map[string]int{
+		"secret_shares":    secretShares,
+		"secret_threshold": secretThreshold,
+	}
+
+	responseBody, err := c.doRequest(ctx, http.MethodPost, "/v1/sys/init", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp InitResponse
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse init response: %w", err)
+	}
+
+	return &resp, nil
+}
+
+// Unseal submits an unseal key and returns the updated seal status
+func (c *Client) Unseal(ctx context.Context, key string) (*SealStatus, error) {
+	req := map[string]string{"key": key}
+
+	responseBody, err := c.doRequest(ctx, http.MethodPost, "/v1/sys/unseal", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var status SealStatus
+	if err := json.Unmarshal(responseBody, &status); err != nil {
+		return nil, fmt.Errorf("failed to parse seal status: %w", err)
+	}
+
+	return &status, nil
+}
+
+// Seal seals the vault (requires authentication)
+func (c *Client) Seal(ctx context.Context) error {
+	_, err := c.doRequest(ctx, http.MethodPost, "/v1/sys/seal", nil)
+	return err
+}
+
+// LookupToken looks up the current token's information
+func (c *Client) LookupToken(ctx context.Context) (map[string]interface{}, error) {
+	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/auth/token/lookup-self", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Data map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse token lookup response: %w", err)
+	}
+
+	return resp.Data, nil
+}
+
+// RenewToken renews the current token
+func (c *Client) RenewToken(ctx context.Context, ttl string) error {
+	req := map[string]string{}
+	if ttl != "" {
+		req["ttl"] = ttl
+	}
+	_, err := c.doRequest(ctx, http.MethodPost, "/v1/auth/token/renew-self", req)
+	return err
+}
+
+// RevokeToken revokes the current token
+func (c *Client) RevokeToken(ctx context.Context) error {
+	_, err := c.doRequest(ctx, http.MethodPost, "/v1/auth/token/revoke-self", nil)
+	return err
+}
+
+// Health checks the health of the vault server
+func (c *Client) Health(ctx context.Context) (map[string]interface{}, error) {
+	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/health", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse health response: %w", err)
+	}
+
+	return resp, nil
 }

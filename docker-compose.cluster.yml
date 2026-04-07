@@ -1,0 +1,84 @@
+##
+## SecureVault 3-Node Cluster with Replication
+##
+## Usage:
+##   docker compose -f docker-compose.cluster.yml up --build
+##
+## This creates:
+##   - vault-leader  (port 8200) — accepts writes, replicates to followers
+##   - vault-follower-1 (port 8210) — receives replicated data
+##   - vault-follower-2 (port 8220) — receives replicated data
+##
+
+services:
+  vault-leader:
+    build: .
+    container_name: vault-leader
+    ports:
+      - "8200:8200"
+      - "8201:8201"
+    volumes:
+      - ./deploy/configs/leader.yaml:/vault/config/config.yaml:ro
+      - leader-data:/vault/data
+    networks:
+      vault-cluster:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8200/v1/health | grep -qE '(200|503)'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  vault-follower-1:
+    build: .
+    container_name: vault-follower-1
+    ports:
+      - "8210:8200"
+      - "8211:8201"
+    volumes:
+      - ./deploy/configs/follower1.yaml:/vault/config/config.yaml:ro
+      - follower1-data:/vault/data
+    networks:
+      vault-cluster:
+        ipv4_address: 172.28.0.11
+    depends_on:
+      vault-leader:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8200/v1/health | grep -qE '(200|503)'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  vault-follower-2:
+    build: .
+    container_name: vault-follower-2
+    ports:
+      - "8220:8200"
+      - "8221:8201"
+    volumes:
+      - ./deploy/configs/follower2.yaml:/vault/config/config.yaml:ro
+      - follower2-data:/vault/data
+    networks:
+      vault-cluster:
+        ipv4_address: 172.28.0.12
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8200/v1/health | grep -qE '(200|503)'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  leader-data:
+  follower1-data:
+  follower2-data:
+
+networks:
+  vault-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

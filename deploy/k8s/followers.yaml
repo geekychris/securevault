@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault-follower
+  namespace: securevault
+  labels:
+    app: securevault
+    role: follower
+spec:
+  serviceName: vault-follower
+  replicas: 2
+  selector:
+    matchLabels:
+      app: securevault
+      role: follower
+  template:
+    metadata:
+      labels:
+        app: securevault
+        role: follower
+    spec:
+      containers:
+        - name: vault
+          image: securevault:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8200
+              name: api
+            - containerPort: 8201
+              name: cluster
+          volumeMounts:
+            - name: config
+              mountPath: /vault/config
+            - name: data
+              mountPath: /vault/data
+            - name: audit
+              mountPath: /vault/audit
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: config
+          configMap:
+            name: vault-follower-config
+        - name: audit
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-follower
+  namespace: securevault
+  labels:
+    app: securevault
+    role: follower
+spec:
+  clusterIP: None
+  ports:
+    - port: 8200
+      targetPort: 8200
+      name: api
+    - port: 8201
+      targetPort: 8201
+      name: cluster
+  selector:
+    app: securevault
+    role: follower
+---
+# External service to expose followers for reading
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-read
+  namespace: securevault
+  labels:
+    app: securevault
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8200
+      targetPort: 8200
+      name: api
+  selector:
+    app: securevault

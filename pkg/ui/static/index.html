@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SecureVault</title>
+<style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif; background: #0f0f1a; color: #e0e0e0; }
+a { color: #00b4d8; text-decoration: none; }
+a:hover { text-decoration: underline; }
+input, select, textarea, button { font-family: inherit; font-size: inherit; }
+code, pre { font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace; }
+
+/* ── Layout ── */
+#app { display: flex; height: 100vh; flex-direction: column; }
+.layout { display: flex; flex: 1; overflow: hidden; }
+.sidebar { width: 240px; background: #12122a; border-right: 1px solid #2a2a4a; display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-brand { padding: 20px; border-bottom: 1px solid #2a2a4a; text-align: center; }
+.sidebar-brand h2 { font-size: 18px; color: #00b4d8; letter-spacing: 1px; }
+.sidebar-brand small { color: #666; font-size: 11px; }
+.sidebar-nav { flex: 1; padding: 12px 0; overflow-y: auto; }
+.sidebar-nav .nav-item { display: flex; align-items: center; padding: 10px 20px; color: #999; cursor: pointer; transition: all .15s; border-left: 3px solid transparent; }
+.sidebar-nav .nav-item:hover { background: #1a1a35; color: #ccc; }
+.sidebar-nav .nav-item.active { color: #00b4d8; background: #1a1a35; border-left-color: #00b4d8; }
+.sidebar-nav .nav-item .icon { width: 20px; margin-right: 12px; text-align: center; font-size: 14px; }
+.sidebar-footer { padding: 12px 20px; border-top: 1px solid #2a2a4a; font-size: 12px; color: #555; }
+
+.topbar { height: 52px; background: #161630; border-bottom: 1px solid #2a2a4a; display: flex; align-items: center; padding: 0 24px; justify-content: space-between; flex-shrink: 0; }
+.topbar-left { display: flex; align-items: center; gap: 16px; }
+.topbar-left h3 { font-size: 15px; color: #ccc; font-weight: 500; }
+.seal-badge { font-size: 11px; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
+.seal-badge.sealed { background: #e94560; color: #fff; }
+.seal-badge.unsealed { background: #1b4332; color: #52b788; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.topbar-right .token-display { font-size: 12px; color: #666; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.main-content { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* ── Login page ── */
+.login-page { display: flex; align-items: center; justify-content: center; height: 100vh; background: #0f0f1a; }
+.login-card { background: #161630; border: 1px solid #2a2a4a; border-radius: 8px; padding: 40px; width: 400px; max-width: 90vw; }
+.login-card h1 { color: #00b4d8; margin-bottom: 8px; font-size: 26px; }
+.login-card p { color: #666; margin-bottom: 24px; font-size: 14px; }
+
+/* ── Forms ── */
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-size: 13px; color: #999; font-weight: 500; }
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 10px 12px; background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 6px; color: #e0e0e0; outline: none; transition: border-color .15s;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: #00b4d8; }
+.form-group textarea { min-height: 100px; resize: vertical; }
+
+/* ── Buttons ── */
+.btn { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 13px; transition: all .15s; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: #0f3460; color: #fff; }
+.btn-primary:hover { background: #1a4a80; }
+.btn-danger { background: #541220; color: #e94560; }
+.btn-danger:hover { background: #6b1a2c; }
+.btn-success { background: #1b4332; color: #52b788; }
+.btn-success:hover { background: #245a42; }
+.btn-secondary { background: #2a2a4a; color: #ccc; }
+.btn-secondary:hover { background: #3a3a5a; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-full { width: 100%; justify-content: center; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Breadcrumbs ── */
+.breadcrumb { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 16px; color: #666; flex-wrap: wrap; }
+.breadcrumb a { color: #00b4d8; cursor: pointer; }
+.breadcrumb .sep { color: #444; }
+
+/* ── Tables ── */
+.table-wrap { background: #161630; border: 1px solid #2a2a4a; border-radius: 8px; overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #666; padding: 12px 16px; background: #12122a; border-bottom: 1px solid #2a2a4a; }
+td { padding: 10px 16px; border-bottom: 1px solid #1a1a35; font-size: 13px; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #1a1a35; }
+
+/* ── Cards ── */
+.card { background: #161630; border: 1px solid #2a2a4a; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.card-header h3 { font-size: 16px; color: #ccc; }
+
+/* ── KV display ── */
+.kv-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #1a1a35; gap: 12px; }
+.kv-row:last-child { border-bottom: none; }
+.kv-key { font-weight: 600; color: #00b4d8; min-width: 140px; font-size: 13px; }
+.kv-value { flex: 1; font-family: monospace; font-size: 13px; word-break: break-all; }
+.kv-value.masked { color: #555; letter-spacing: 2px; }
+.kv-toggle { cursor: pointer; color: #666; font-size: 12px; min-width: 40px; text-align: center; }
+.kv-toggle:hover { color: #00b4d8; }
+
+/* ── Dynamic KV input rows ── */
+.kv-input-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.kv-input-row input { flex: 1; }
+.kv-input-row .btn-remove { color: #e94560; background: none; border: none; cursor: pointer; font-size: 18px; padding: 4px 8px; }
+
+/* ── Tags / Badges ── */
+.tag { display: inline-block; padding: 2px 8px; background: #0f3460; border-radius: 4px; font-size: 11px; color: #7ec8e3; margin-right: 4px; margin-bottom: 4px; }
+
+/* ── Toasts ── */
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 20px; border-radius: 6px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,.4); animation: slideIn .25s ease-out; max-width: 400px; }
+.toast.success { background: #1b4332; color: #52b788; border: 1px solid #2d6a4f; }
+.toast.error { background: #541220; color: #e94560; border: 1px solid #7a1a30; }
+.toast.info { background: #0f3460; color: #7ec8e3; border: 1px solid #1a4a80; }
+@keyframes slideIn { from { transform: translateX(100%); opacity:0; } to { transform: translateX(0); opacity:1; } }
+
+/* ── Modal ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: #161630; border: 1px solid #2a2a4a; border-radius: 8px; padding: 24px; width: 480px; max-width: 90vw; }
+.modal h3 { margin-bottom: 12px; color: #ccc; }
+.modal p { color: #999; font-size: 14px; margin-bottom: 20px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ── Spinner ── */
+.spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #2a2a4a; border-top-color: #00b4d8; border-radius: 50%; animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-wrap { display: flex; align-items: center; justify-content: center; padding: 40px; }
+
+/* ── Section header ── */
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.section-header h2 { font-size: 20px; color: #e0e0e0; }
+
+/* ── Filters ── */
+.filters { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: flex-end; }
+.filters .form-group { margin-bottom: 0; min-width: 160px; }
+
+/* ── Pagination ── */
+.pagination { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 16px; }
+.pagination .btn { min-width: 36px; justify-content: center; }
+.pagination .page-info { font-size: 13px; color: #666; }
+
+/* ── Secrets list items ── */
+.secret-item { display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid #1a1a35; cursor: pointer; transition: background .15s; }
+.secret-item:hover { background: #1a1a35; }
+.secret-item:last-child { border-bottom: none; }
+.secret-item .icon { margin-right: 12px; font-size: 16px; color: #666; }
+.secret-item .name { flex: 1; font-size: 14px; }
+.secret-item .name.folder { color: #00b4d8; }
+
+/* ── Policy rules display ── */
+.rule-block { background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 6px; padding: 12px; margin-bottom: 8px; }
+.rule-path { font-family: monospace; color: #00b4d8; font-size: 13px; margin-bottom: 6px; }
+.rule-caps { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* ── Status grid ── */
+.status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.status-card { background: #161630; border: 1px solid #2a2a4a; border-radius: 8px; padding: 20px; text-align: center; }
+.status-card .value { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+.status-card .label { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: .5px; }
+.status-card .value.ok { color: #52b788; }
+.status-card .value.warn { color: #e9c46a; }
+.status-card .value.error { color: #e94560; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a5a; }
+
+/* ── Empty state ── */
+.empty-state { text-align: center; padding: 60px 20px; color: #555; }
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: .5; }
+.empty-state h3 { color: #888; margin-bottom: 8px; font-size: 18px; }
+.empty-state p { font-size: 13px; max-width: 400px; margin: 0 auto 20px; line-height: 1.5; }
+
+/* ── Details/Summary ── */
+details summary { cursor: pointer; color: #666; font-size: 12px; padding: 4px 0; }
+details summary:hover { color: #00b4d8; }
+details[open] summary { margin-bottom: 8px; }
+
+/* ── Copy button inline ── */
+.copy-btn { background: none; border: 1px solid #2a2a4a; color: #666; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; transition: all .15s; }
+.copy-btn:hover { border-color: #00b4d8; color: #00b4d8; }
+
+/* ── Transitions ── */
+.fade-in { animation: fadeIn .2s ease-out; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Tooltip ── */
+[data-tooltip] { position: relative; }
+[data-tooltip]:hover::after { content: attr(data-tooltip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: #2a2a4a; color: #ccc; padding: 4px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; z-index: 100; pointer-events: none; }
+
+/* ── Focus ring ── */
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid #00b4d840; outline-offset: 2px; }
+
+/* ── Select styling ── */
+select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .sidebar { width: 56px; }
+  .sidebar-brand h2, .sidebar-brand small, .sidebar-nav .nav-item span, .sidebar-footer { display: none; }
+  .sidebar-nav .nav-item { justify-content: center; padding: 12px; }
+  .sidebar-nav .nav-item .icon { margin-right: 0; }
+  .section-header { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .filters { flex-direction: column; }
+  .status-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+  .main-content { padding: 16px; }
+  .status-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="toast-container" id="toasts"></div>
+
+<script>
+/* =========================================================================
+   SecureVault Web UI
+   ========================================================================= */
+
+const App = {
+  token: sessionStorage.getItem('vault_token') || '',
+  sealStatus: { sealed: false },
+  currentPage: 'secrets',
+  secretPath: [],       // breadcrumb segments
+  secrets: [],          // current listing
+  currentSecret: null,  // loaded secret
+  policies: [],
+  currentPolicy: null,
+  auditEvents: [],
+  auditPage: 1,
+  auditTotal: 0,
+  healthData: null,
+  initialized: true,    // assume true until we know otherwise
+};
+
+// ── API helpers ──────────────────────────────────────────────────────────
+function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (App.token) opts.headers['X-Vault-Token'] = App.token;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(path, opts).then(async res => {
+    if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (res.status === 204) return null;
+    const text = await res.text();
+    if (!text) return null;
+    const data = JSON.parse(text);
+    if (!res.ok) throw new Error(res.status + ': ' + (data.error || data.message || text || res.statusText));
+    return data;
+  });
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── Modal ────────────────────────────────────────────────────────────────
+function showModal(title, message, onConfirm) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>${esc(title)}</h3>
+      <p>${esc(message)}</p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+        <button class="btn btn-danger" id="modal-confirm">Confirm</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#modal-cancel').onclick = () => overlay.remove();
+  overlay.querySelector('#modal-confirm').onclick = () => { overlay.remove(); onConfirm(); };
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+}
+
+// ── Escape HTML ──────────────────────────────────────────────────────────
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function encodePath(p) { return p.split('/').map(s => encodeURIComponent(s)).join('/'); }
+
+// ── Render Engine ────────────────────────────────────────────────────────
+function render() {
+  const root = document.getElementById('app');
+  if (!App.token) {
+    root.innerHTML = renderLogin();
+    bindLogin();
+    return;
+  }
+  root.innerHTML = `
+    <div class="topbar">
+      <div class="topbar-left">
+        <h3>SecureVault</h3>
+        <span class="seal-badge ${App.sealStatus.sealed ? 'sealed' : 'unsealed'}">${App.sealStatus.sealed ? 'Sealed' : 'Unsealed'}</span>
+      </div>
+      <div class="topbar-right">
+        <span class="token-display" title="${esc(App.token)}">${esc(App.token)}</span>
+        <button class="btn btn-secondary btn-sm" onclick="logout()">Logout</button>
+      </div>
+    </div>
+    <div class="layout">
+      <div class="sidebar">
+        <div class="sidebar-brand"><h2>SecureVault</h2><small>Secret Management</small></div>
+        <nav class="sidebar-nav">
+          ${navItem('secrets', '&#128274;', 'Secrets')}
+          ${navItem('policies', '&#128220;', 'Policies')}
+          ${navItem('tokens', '&#128273;', 'Tokens')}
+          ${navItem('audit', '&#128203;', 'Audit Log')}
+          ${navItem('system', '&#9881;', 'System')}
+        </nav>
+        <div class="sidebar-footer">SecureVault UI v1.0</div>
+      </div>
+      <div class="main-content" id="content"></div>
+    </div>`;
+  renderPage();
+}
+
+function navItem(page, icon, label) {
+  return `<div class="nav-item ${App.currentPage === page ? 'active' : ''}" onclick="navigate('${page}')">
+    <span class="icon">${icon}</span><span>${label}</span></div>`;
+}
+
+function navigate(page) { App.currentPage = page; render(); }
+
+function renderPage() {
+  const c = document.getElementById('content');
+  if (!c) return;
+  switch (App.currentPage) {
+    case 'secrets': renderSecrets(c); break;
+    case 'policies': renderPolicies(c); break;
+    case 'tokens': renderTokens(c); break;
+    case 'audit': renderAudit(c); break;
+    case 'system': renderSystem(c); break;
+  }
+}
+
+// ── Login ────────────────────────────────────────────────────────────────
+function renderLogin() {
+  return `<div class="login-page"><div class="login-card">
+    <h1>SecureVault</h1>
+    <p>Enter your vault token to authenticate.</p>
+    <div id="login-status" style="margin-bottom:16px;"></div>
+    <div id="login-form-area">
+      <div class="form-group">
+        <label>Token</label>
+        <input type="password" id="login-token" placeholder="s.xxxxxxxxxx" autocomplete="off"/>
+      </div>
+      <button class="btn btn-primary btn-full" id="login-btn">Sign In</button>
+      <div style="margin-top:16px;text-align:center;">
+        <a style="font-size:12px;color:#666;cursor:pointer;" id="show-init-link">Initialize new vault</a>
+      </div>
+    </div>
+    <div id="init-form-area" style="display:none;">
+      <div class="form-group">
+        <label>Number of Key Shares</label>
+        <input type="number" id="init-shares" value="5" min="1" max="10"/>
+      </div>
+      <div class="form-group">
+        <label>Key Threshold</label>
+        <input type="number" id="init-threshold" value="3" min="1" max="10"/>
+      </div>
+      <button class="btn btn-primary btn-full" id="init-btn">Initialize Vault</button>
+      <div style="margin-top:12px;text-align:center;">
+        <a style="font-size:12px;color:#666;cursor:pointer;" id="show-login-link">Back to login</a>
+      </div>
+      <div id="init-result" style="display:none;margin-top:16px;"></div>
+    </div>
+    <div id="unseal-form-area" style="display:none;">
+      <div style="text-align:center;margin-bottom:16px;">
+        <span class="seal-badge sealed" style="font-size:14px;padding:6px 16px;">Vault is Sealed</span>
+      </div>
+      <p style="color:#999;font-size:13px;margin-bottom:16px;text-align:center;">Provide unseal keys to unlock the vault.</p>
+      <div class="form-group">
+        <label>Unseal Key</label>
+        <input type="text" id="login-unseal-key" placeholder="Enter unseal key"/>
+      </div>
+      <div id="unseal-progress" style="margin-bottom:12px;font-size:12px;color:#666;"></div>
+      <button class="btn btn-success btn-full" id="login-unseal-btn">Submit Unseal Key</button>
+      <div style="margin-top:12px;text-align:center;">
+        <a style="font-size:12px;color:#666;cursor:pointer;" id="show-login-from-unseal">Back to login</a>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+function bindLogin() {
+  const btn = document.getElementById('login-btn');
+  const inp = document.getElementById('login-token');
+  if (!btn) return;
+
+  // Check server health and seal status on load
+  checkLoginStatus();
+
+  const doLogin = () => {
+    const t = inp.value.trim();
+    if (!t) { toast('Please enter a token', 'error'); return; }
+    App.token = t;
+    sessionStorage.setItem('vault_token', t);
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner"></div> Authenticating...';
+    // Verify token works by hitting a protected endpoint
+    api('GET', '/v1/secret/list/').then(() => {
+      toast('Authenticated successfully', 'success');
+      render();
+    }).catch(err => {
+      if (err.message === 'Unauthorized') {
+        App.token = '';
+        sessionStorage.removeItem('vault_token');
+        toast('Invalid token', 'error');
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      } else {
+        // Could be a different error - still proceed
+        toast('Authenticated', 'success');
+        render();
+      }
+    });
+  };
+  btn.onclick = doLogin;
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  inp.focus();
+
+  // Toggle init form
+  const showInit = document.getElementById('show-init-link');
+  const showLogin = document.getElementById('show-login-link');
+  const showLoginFromUnseal = document.getElementById('show-login-from-unseal');
+  if (showInit) showInit.onclick = () => {
+    document.getElementById('login-form-area').style.display = 'none';
+    document.getElementById('init-form-area').style.display = 'block';
+  };
+  if (showLogin) showLogin.onclick = () => {
+    document.getElementById('init-form-area').style.display = 'none';
+    document.getElementById('login-form-area').style.display = 'block';
+  };
+  if (showLoginFromUnseal) showLoginFromUnseal.onclick = () => {
+    document.getElementById('unseal-form-area').style.display = 'none';
+    document.getElementById('login-form-area').style.display = 'block';
+  };
+
+  // Init button
+  const initBtn = document.getElementById('init-btn');
+  if (initBtn) initBtn.onclick = initializeVault;
+
+  // Login unseal button
+  const unsealBtn = document.getElementById('login-unseal-btn');
+  if (unsealBtn) unsealBtn.onclick = () => {
+    const key = document.getElementById('login-unseal-key').value.trim();
+    if (!key) { toast('Enter an unseal key', 'error'); return; }
+    api('POST', '/v1/sys/unseal', { key }).then(data => {
+      App.sealStatus.sealed = false;
+      toast('Unseal key accepted', 'success');
+      document.getElementById('unseal-form-area').style.display = 'none';
+      document.getElementById('login-form-area').style.display = 'block';
+    }).catch(err => toast('Unseal failed: ' + err.message, 'error'));
+  };
+}
+
+function checkLoginStatus() {
+  const statusEl = document.getElementById('login-status');
+  if (!statusEl) return;
+  statusEl.innerHTML = '<div style="text-align:center;"><div class="spinner"></div></div>';
+  fetch('/v1/health').then(r => r.json()).then(data => {
+    App.healthData = data;
+    if (data.sealed) {
+      App.sealStatus.sealed = true;
+      statusEl.innerHTML = '';
+      // Show unseal UI
+      document.getElementById('login-form-area').style.display = 'none';
+      document.getElementById('unseal-form-area').style.display = 'block';
+    } else if (data.initialized === false) {
+      App.initialized = false;
+      statusEl.innerHTML = '<div style="text-align:center;padding:8px;background:#0f3460;border-radius:6px;font-size:12px;color:#7ec8e3;">Vault is not initialized. <a onclick="document.getElementById(\'show-init-link\').click()" style="cursor:pointer;">Initialize now</a></div>';
+    } else {
+      statusEl.innerHTML = '<div style="text-align:center;padding:8px;background:#1b4332;border-radius:6px;font-size:12px;color:#52b788;">Server is healthy and unsealed.</div>';
+      setTimeout(() => { if (statusEl) statusEl.innerHTML = ''; }, 3000);
+    }
+  }).catch(() => {
+    statusEl.innerHTML = '<div style="text-align:center;padding:8px;background:#541220;border-radius:6px;font-size:12px;color:#e94560;">Cannot reach server.</div>';
+  });
+}
+
+function initializeVault() {
+  const shares = parseInt(document.getElementById('init-shares').value) || 5;
+  const threshold = parseInt(document.getElementById('init-threshold').value) || 3;
+  const initBtn = document.getElementById('init-btn');
+  initBtn.disabled = true;
+  initBtn.innerHTML = '<div class="spinner"></div> Initializing...';
+  api('POST', '/v1/sys/init', { secret_shares: shares, secret_threshold: threshold }).then(data => {
+    const result = document.getElementById('init-result');
+    if (result) {
+      result.style.display = 'block';
+      const keys = data.keys || data.unseal_keys || [];
+      const rootToken = data.root_token || '';
+      result.innerHTML = `
+        <div style="background:#1b4332;border:1px solid #2d6a4f;border-radius:6px;padding:16px;">
+          <div style="font-size:13px;color:#52b788;margin-bottom:12px;font-weight:600;">Vault Initialized Successfully!</div>
+          <div style="font-size:12px;color:#e94560;margin-bottom:12px;">IMPORTANT: Save these keys securely. They will not be shown again.</div>
+          ${keys.map((k, i) => `<div style="margin-bottom:4px;"><span style="color:#999;font-size:11px;">Key ${i+1}:</span> <code style="background:#0f0f1a;padding:2px 6px;border-radius:3px;font-size:11px;">${esc(k)}</code></div>`).join('')}
+          ${rootToken ? `<div style="margin-top:12px;"><span style="color:#999;font-size:11px;">Root Token:</span> <code style="background:#0f0f1a;padding:2px 6px;border-radius:3px;font-size:11px;">${esc(rootToken)}</code></div>` : ''}
+        </div>`;
+    }
+    initBtn.disabled = false;
+    initBtn.textContent = 'Initialize Vault';
+    toast('Vault initialized', 'success');
+  }).catch(err => {
+    toast('Initialize failed: ' + err.message, 'error');
+    initBtn.disabled = false;
+    initBtn.textContent = 'Initialize Vault';
+  });
+}
+
+function logout() {
+  App.token = '';
+  sessionStorage.removeItem('vault_token');
+  App.currentPage = 'secrets';
+  App.secretPath = [];
+  App.currentSecret = null;
+  render();
+}
+
+// ── Secrets Page ─────────────────────────────────────────────────────────
+function renderSecrets(c) {
+  if (App.currentSecret) {
+    renderSecretDetail(c);
+    return;
+  }
+  const pathStr = App.secretPath.join('/') || '';
+  c.innerHTML = `
+    <div class="section-header">
+      <h2>Secrets</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <div style="position:relative;">
+          <input type="text" id="secret-search" placeholder="Type a path, e.g. app/db" value="${esc(pathStr)}" style="padding:6px 12px;background:#0f0f1a;border:1px solid #2a2a4a;border-radius:6px;color:#e0e0e0;font-size:12px;width:240px;outline:none;" onkeydown="if(event.key==='Enter')jumpToPath()"/>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="jumpToPath()">Go</button>
+        <button class="btn btn-secondary btn-sm" onclick="loadSecrets(App.secretPath.join('/'))">Refresh</button>
+        <button class="btn btn-primary btn-sm" onclick="showCreateSecret()">+ New Secret</button>
+      </div>
+    </div>
+    ${renderBreadcrumb()}
+    <div id="secret-list"><div class="loading-wrap"><div class="spinner"></div></div></div>
+    <div id="create-secret-form" style="display:none"></div>`;
+  loadSecrets(pathStr);
+}
+
+function jumpToPath() {
+  const input = document.getElementById('secret-search');
+  if (!input) return;
+  const path = input.value.trim();
+  if (!path) return;
+  // Try to load as a direct secret first
+  api('GET', '/v1/secret/' + encodePath(path)).then(data => {
+    App.currentSecret = { path, data: data.data || {}, metadata: data.metadata || {}, fullMeta: null };
+    // Also load metadata
+    api('GET', '/v1/secret/metadata/' + encodePath(path)).catch(() => null).then(meta => {
+      if (App.currentSecret) App.currentSecret.fullMeta = meta;
+      renderPage();
+    });
+  }).catch(() => {
+    // Not a direct secret - navigate to path as directory
+    App.secretPath = path.split('/').filter(s => s);
+    App.currentSecret = null;
+    renderPage();
+  });
+}
+
+function renderBreadcrumb() {
+  let html = '<div class="breadcrumb"><a onclick="navigateSecretPath(-1)">root</a>';
+  App.secretPath.forEach((seg, i) => {
+    html += `<span class="sep">/</span><a onclick="navigateSecretPath(${i})">${esc(seg)}</a>`;
+  });
+  return html + '</div>';
+}
+
+function navigateSecretPath(idx) {
+  App.currentSecret = null;
+  if (idx < 0) App.secretPath = [];
+  else App.secretPath = App.secretPath.slice(0, idx + 1);
+  renderPage();
+}
+
+function loadSecrets(path) {
+  const listPath = path || '';
+  api('GET', '/v1/secret/list/' + encodePath(listPath)).then(data => {
+    App.secrets = (data && data.keys) || [];
+    const container = document.getElementById('secret-list');
+    if (!container) return;
+    if (App.secrets.length === 0) {
+      container.innerHTML = `<div class="card empty-state">
+        <div class="empty-icon">&#128274;</div>
+        <h3>No Secrets Here</h3>
+        <p>There are no secrets stored at this path yet. Create your first secret using the button above.</p>
+        <button class="btn btn-primary btn-sm" onclick="showCreateSecret()">+ Create Secret</button>
+      </div>`;
+      return;
+    }
+    let html = '<div class="table-wrap">';
+    App.secrets.forEach(key => {
+      const isDir = key.endsWith('/');
+      const display = isDir ? key.slice(0, -1) : key;
+      html += `<div class="secret-item" onclick="secretClick('${esc(key)}')">
+        <span class="icon">${isDir ? '&#128193;' : '&#128196;'}</span>
+        <span class="name ${isDir ? 'folder' : ''}">${esc(display)}</span>
+      </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }).catch(err => {
+    const container = document.getElementById('secret-list');
+    if (!container) return;
+    const isPermission = err.message && (err.message.includes('403') || err.message.toLowerCase().includes('permission') || err.message.toLowerCase().includes('forbidden'));
+    if (isPermission) {
+      container.innerHTML = `<div class="card" style="text-align:center;padding:40px;">
+        <div style="font-size:28px;margin-bottom:12px;">&#128274;</div>
+        <h3 style="color:#e94560;margin-bottom:8px;">Access Denied</h3>
+        <p style="color:#888;margin-bottom:16px;">Your token does not have <strong>list</strong> permission on this path.<br>
+        If you know the path to your secrets, type it in the search box above.</p>
+        <p style="color:#666;font-size:12px;">Example: <code>app/db</code> or <code>shared/logging</code></p>
+      </div>`;
+    } else {
+      container.innerHTML = '<div class="card" style="color:#666;text-align:center;padding:40px;">No secrets found at this path.</div>';
+    }
+  });
+}
+
+function secretClick(key) {
+  if (key.endsWith('/')) {
+    App.secretPath.push(key.slice(0, -1));
+    renderPage();
+  } else {
+    const fullPath = App.secretPath.length ? App.secretPath.join('/') + '/' + key : key;
+    loadSecretDetail(fullPath);
+  }
+}
+
+function loadSecretDetail(path) {
+  const content = document.getElementById('content');
+  if (content) content.innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+  Promise.all([
+    api('GET', '/v1/secret/' + encodePath(path)),
+    api('GET', '/v1/secret/metadata/' + encodePath(path)).catch(() => null)
+  ]).then(([secret, meta]) => {
+    App.currentSecret = { path, data: secret.data || {}, metadata: secret.metadata || {}, fullMeta: meta };
+    renderPage();
+  }).catch(err => {
+    toast('Failed to load secret: ' + err.message, 'error');
+    App.currentSecret = null;
+    renderPage();
+  });
+}
+
+function renderSecretDetail(c) {
+  const s = App.currentSecret;
+  const meta = s.metadata || {};
+  const fullMeta = s.fullMeta || {};
+  const currentVersion = meta.current_version || meta.version || 1;
+  const versions = fullMeta.versions || {};
+  const versionCount = Object.keys(versions).length || currentVersion;
+
+  let versionOptions = '';
+  for (let v = versionCount; v >= 1; v--) {
+    versionOptions += `<option value="${v}" ${v == (meta.version || currentVersion) ? 'selected' : ''}>Version ${v}</option>`;
+  }
+
+  c.innerHTML = `
+    <div class="breadcrumb">
+      <a onclick="backToList()">Secrets</a>
+      <span class="sep">/</span>
+      <span>${esc(s.path)}</span>
+    </div>
+    <div class="section-header">
+      <h2>${esc(s.path)}</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary btn-sm" onclick="editSecret()">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteSecret()">Delete</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <h3>Key-Value Data</h3>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <select id="version-select" class="form-group" style="margin:0;padding:6px 10px;background:#0f0f1a;border:1px solid #2a2a4a;border-radius:6px;color:#e0e0e0;font-size:12px;" onchange="loadVersion()">${versionOptions}</select>
+          <button class="btn btn-secondary btn-sm" onclick="toggleAllValues()">Show/Hide All</button>
+        </div>
+      </div>
+      <div id="kv-display">${renderKV(s.data)}</div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Metadata</h3></div>
+      <div class="kv-row"><span class="kv-key">Version</span><span class="kv-value">${meta.version || 1}</span></div>
+      <div class="kv-row"><span class="kv-key">Current Version</span><span class="kv-value">${currentVersion}</span></div>
+      <div class="kv-row"><span class="kv-key">Created</span><span class="kv-value">${meta.created_time || 'N/A'}</span></div>
+      <div class="kv-row"><span class="kv-key">Created By</span><span class="kv-value">${meta.created_by || 'N/A'}</span></div>
+    </div>`;
+}
+
+function renderKV(data) {
+  if (!data || Object.keys(data).length === 0) {
+    return '<div class="empty-state" style="padding:20px;"><p>No key-value data in this secret.</p></div>';
+  }
+  let html = `<div style="font-size:11px;color:#555;margin-bottom:8px;">${Object.keys(data).length} key${Object.keys(data).length !== 1 ? 's' : ''}</div>`;
+  for (const [k, v] of Object.entries(data)) {
+    const val = typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+    html += `<div class="kv-row">
+      <span class="kv-key">${esc(k)}</span>
+      <span class="kv-value masked" data-val="${esc(val)}">********</span>
+      <span class="kv-toggle" onclick="toggleValue(this)">show</span>
+      <button class="copy-btn" onclick="copyToClipboard(this.parentElement.querySelector('.kv-value').dataset.val)" data-tooltip="Copy value">copy</button>
+    </div>`;
+  }
+  return html;
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    toast('Copied to clipboard', 'success');
+  }).catch(() => {
+    // Fallback for older browsers
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('Copied to clipboard', 'success');
+  });
+}
+
+function toggleValue(el) {
+  const valEl = el.previousElementSibling;
+  if (valEl.classList.contains('masked')) {
+    valEl.textContent = valEl.dataset.val;
+    valEl.classList.remove('masked');
+    el.textContent = 'hide';
+  } else {
+    valEl.textContent = '********';
+    valEl.classList.add('masked');
+    el.textContent = 'show';
+  }
+}
+
+function toggleAllValues() {
+  document.querySelectorAll('#kv-display .kv-toggle').forEach(el => toggleValue(el));
+}
+
+function loadVersion() {
+  const sel = document.getElementById('version-select');
+  if (!sel || !App.currentSecret) return;
+  const v = sel.value;
+  const path = App.currentSecret.path;
+  api('GET', '/v1/secret/versions/' + v + '/' + encodePath(path)).then(data => {
+    const kvDisplay = document.getElementById('kv-display');
+    if (kvDisplay) kvDisplay.innerHTML = renderKV(data.data);
+    if (data.metadata) App.currentSecret.metadata.version = data.metadata.version;
+  }).catch(err => toast('Failed to load version: ' + err.message, 'error'));
+}
+
+function backToList() { App.currentSecret = null; renderPage(); }
+
+function showCreateSecret() {
+  const form = document.getElementById('create-secret-form');
+  if (!form) return;
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  form.innerHTML = `
+    <div class="card">
+      <div class="card-header"><h3>Create Secret</h3></div>
+      <div class="form-group">
+        <label>Secret Path</label>
+        <input type="text" id="new-secret-path" placeholder="my/secret/path" value="${App.secretPath.join('/')}${App.secretPath.length ? '/' : ''}"/>
+      </div>
+      <div id="kv-inputs">
+        <div class="kv-input-row">
+          <input type="text" placeholder="Key" class="kv-key-input"/>
+          <input type="text" placeholder="Value" class="kv-val-input"/>
+          <button class="btn-remove" onclick="this.parentElement.remove()">&times;</button>
+        </div>
+      </div>
+      <div style="margin-bottom:16px;">
+        <button class="btn btn-secondary btn-sm" onclick="addKVRow()">+ Add Field</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="createSecret()">Create</button>
+        <button class="btn btn-secondary" onclick="document.getElementById('create-secret-form').style.display='none'">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function addKVRow() {
+  const container = document.getElementById('kv-inputs');
+  if (!container) return;
+  const row = document.createElement('div');
+  row.className = 'kv-input-row';
+  row.innerHTML = `<input type="text" placeholder="Key" class="kv-key-input"/>
+    <input type="text" placeholder="Value" class="kv-val-input"/>
+    <button class="btn-remove" onclick="this.parentElement.remove()">&times;</button>`;
+  container.appendChild(row);
+}
+
+function createSecret() {
+  const path = document.getElementById('new-secret-path').value.trim();
+  if (!path) { toast('Path is required', 'error'); return; }
+  const data = {};
+  document.querySelectorAll('#kv-inputs .kv-input-row').forEach(row => {
+    const k = row.querySelector('.kv-key-input').value.trim();
+    const v = row.querySelector('.kv-val-input').value;
+    if (k) data[k] = v;
+  });
+  if (Object.keys(data).length === 0) { toast('Add at least one key-value pair', 'error'); return; }
+  api('POST', '/v1/secret/' + encodePath(path), { data }).then(() => {
+    toast('Secret created', 'success');
+    document.getElementById('create-secret-form').style.display = 'none';
+    loadSecrets(App.secretPath.join('/'));
+  }).catch(err => toast('Failed: ' + err.message, 'error'));
+}
+
+function editSecret() {
+  if (!App.currentSecret) return;
+  const s = App.currentSecret;
+  const c = document.getElementById('content');
+  let kvRows = '';
+  for (const [k, v] of Object.entries(s.data)) {
+    const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    kvRows += `<div class="kv-input-row">
+      <input type="text" placeholder="Key" class="kv-key-input" value="${esc(k)}"/>
+      <input type="text" placeholder="Value" class="kv-val-input" value="${esc(val)}"/>
+      <button class="btn-remove" onclick="this.parentElement.remove()">&times;</button>
+    </div>`;
+  }
+  c.innerHTML = `
+    <div class="breadcrumb"><a onclick="backToList()">Secrets</a><span class="sep">/</span><span>${esc(s.path)}</span><span class="sep">/</span><span>Edit</span></div>
+    <div class="card">
+      <div class="card-header"><h3>Edit Secret: ${esc(s.path)}</h3></div>
+      <div id="kv-inputs">${kvRows}</div>
+      <div style="margin-bottom:16px;">
+        <button class="btn btn-secondary btn-sm" onclick="addKVRow()">+ Add Field</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="saveSecret()">Save</button>
+        <button class="btn btn-secondary" onclick="renderPage()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function saveSecret() {
+  if (!App.currentSecret) return;
+  const data = {};
+  document.querySelectorAll('#kv-inputs .kv-input-row').forEach(row => {
+    const k = row.querySelector('.kv-key-input').value.trim();
+    const v = row.querySelector('.kv-val-input').value;
+    if (k) data[k] = v;
+  });
+  api('POST', '/v1/secret/' + encodePath(App.currentSecret.path), { data }).then(() => {
+    toast('Secret updated', 'success');
+    loadSecretDetail(App.currentSecret.path);
+  }).catch(err => toast('Failed: ' + err.message, 'error'));
+}
+
+function deleteSecret() {
+  if (!App.currentSecret) return;
+  showModal('Delete Secret', 'Are you sure you want to delete "' + App.currentSecret.path + '"? This action cannot be undone.', () => {
+    api('DELETE', '/v1/secret/' + encodePath(App.currentSecret.path) + '?destroy=true').then(() => {
+      toast('Secret deleted', 'success');
+      App.currentSecret = null;
+      renderPage();
+    }).catch(err => toast('Failed: ' + err.message, 'error'));
+  });
+}
+
+// ── Policies Page ────────────────────────────────────────────────────────
+function renderPolicies(c) {
+  if (App.currentPolicy) { renderPolicyDetail(c); return; }
+  c.innerHTML = `
+    <div class="section-header">
+      <h2>Policies</h2>
+      <button class="btn btn-primary btn-sm" onclick="showCreatePolicy()">+ New Policy</button>
+    </div>
+    <div id="policy-list"><div class="loading-wrap"><div class="spinner"></div></div></div>
+    <div id="create-policy-form" style="display:none"></div>`;
+  loadPolicies();
+}
+
+function loadPolicies() {
+  api('GET', '/v1/policies').then(data => {
+    const policies = data.policies || data.keys || data || [];
+    App.policies = Array.isArray(policies) ? policies : [];
+    const container = document.getElementById('policy-list');
+    if (!container) return;
+    if (App.policies.length === 0) {
+      container.innerHTML = `<div class="card empty-state">
+        <div class="empty-icon">&#128220;</div>
+        <h3>No Policies</h3>
+        <p>Policies control access to secrets and operations. Create a policy to define fine-grained access rules.</p>
+        <button class="btn btn-primary btn-sm" onclick="showCreatePolicy()">+ Create Policy</button>
+      </div>`;
+      return;
+    }
+    let html = '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Description</th><th>Rules</th><th></th></tr></thead><tbody>';
+    App.policies.forEach(p => {
+      const name = typeof p === 'string' ? p : (p.name || 'unknown');
+      const desc = typeof p === 'object' ? (p.description || '') : '';
+      const ruleCount = typeof p === 'object' && p.rules ? p.rules.length : '-';
+      html += `<tr>
+        <td><a onclick="viewPolicy('${esc(name)}')" style="cursor:pointer">${esc(name)}</a></td>
+        <td style="color:#999">${esc(desc)}</td>
+        <td>${ruleCount}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deletePolicy('${esc(name)}')">Delete</button></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+  }).catch(err => {
+    const container = document.getElementById('policy-list');
+    if (container) container.innerHTML = '<div class="card" style="color:#e94560;padding:20px;">Failed to load policies: ' + esc(err.message) + '</div>';
+  });
+}
+
+function viewPolicy(name) {
+  api('GET', '/v1/policies/' + encodeURIComponent(name)).then(data => {
+    App.currentPolicy = data.policy || data;
+    renderPage();
+  }).catch(err => toast('Failed to load policy: ' + err.message, 'error'));
+}
+
+function renderPolicyDetail(c) {
+  const p = App.currentPolicy;
+  const rules = p.rules || [];
+  let rulesHtml = '';
+  rules.forEach(r => {
+    const caps = (r.capabilities || []).map(cap => `<span class="tag">${esc(cap)}</span>`).join('');
+    rulesHtml += `<div class="rule-block">
+      <div class="rule-path">path "${esc(r.path || '')}"</div>
+      <div class="rule-caps">${caps || '<span style="color:#666">No capabilities</span>'}</div>
+    </div>`;
+  });
+  c.innerHTML = `
+    <div class="breadcrumb"><a onclick="App.currentPolicy=null;renderPage()">Policies</a><span class="sep">/</span><span>${esc(p.name)}</span></div>
+    <div class="section-header">
+      <h2>${esc(p.name)}</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary btn-sm" onclick="editPolicy()">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="deletePolicy('${esc(p.name)}')">Delete</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="kv-row"><span class="kv-key">Name</span><span class="kv-value">${esc(p.name)}</span></div>
+      <div class="kv-row"><span class="kv-key">Description</span><span class="kv-value">${esc(p.description || 'N/A')}</span></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Rules (${rules.length})</h3></div>
+      ${rulesHtml || '<div style="color:#666">No rules defined</div>'}
+    </div>`;
+}
+
+function showCreatePolicy() {
+  const form = document.getElementById('create-policy-form');
+  if (!form) return;
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  form.innerHTML = `
+    <div class="card">
+      <div class="card-header"><h3>Create Policy</h3></div>
+      <div class="form-group"><label>Name</label><input type="text" id="policy-name" placeholder="my-policy"/></div>
+      <div class="form-group"><label>Description</label><input type="text" id="policy-desc" placeholder="Description"/></div>
+      <div id="policy-rules">
+        <label style="font-size:13px;color:#999;margin-bottom:8px;display:block;">Rules</label>
+        ${policyRuleInput()}
+      </div>
+      <div style="margin-bottom:16px;">
+        <button class="btn btn-secondary btn-sm" onclick="addPolicyRule()">+ Add Rule</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="createPolicy()">Create</button>
+        <button class="btn btn-secondary" onclick="document.getElementById('create-policy-form').style.display='none'">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function policyRuleInput(path, caps) {
+  const allCaps = ['create','read','update','delete','list'];
+  const capsChecks = allCaps.map(cap =>
+    `<label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:12px;color:#999;cursor:pointer;">
+      <input type="checkbox" class="rule-cap" value="${cap}" ${(caps||[]).includes(cap) ? 'checked' : ''}/>${cap}
+    </label>`
+  ).join('');
+  return `<div class="rule-input" style="background:#0f0f1a;border:1px solid #2a2a4a;border-radius:6px;padding:12px;margin-bottom:8px;">
+    <div class="form-group" style="margin-bottom:8px;">
+      <input type="text" class="rule-path-input" placeholder="secret/*" value="${esc(path || '')}"/>
+    </div>
+    <div>${capsChecks}</div>
+    <button class="btn-remove" style="color:#e94560;background:none;border:none;cursor:pointer;font-size:12px;margin-top:4px;" onclick="this.closest('.rule-input').remove()">Remove rule</button>
+  </div>`;
+}
+
+function addPolicyRule() {
+  const container = document.getElementById('policy-rules');
+  const div = document.createElement('div');
+  div.innerHTML = policyRuleInput();
+  container.appendChild(div.firstElementChild);
+}
+
+function createPolicy() {
+  const name = document.getElementById('policy-name').value.trim();
+  const desc = document.getElementById('policy-desc').value.trim();
+  if (!name) { toast('Policy name is required', 'error'); return; }
+  const rules = [];
+  document.querySelectorAll('.rule-input').forEach(el => {
+    const path = el.querySelector('.rule-path-input').value.trim();
+    if (!path) return;
+    const caps = [];
+    el.querySelectorAll('.rule-cap:checked').forEach(cb => caps.push(cb.value));
+    rules.push({ path, capabilities: caps });
+  });
+  api('POST', '/v1/policies', { policy: { name, description: desc, rules } }).then(() => {
+    toast('Policy created', 'success');
+    document.getElementById('create-policy-form').style.display = 'none';
+    loadPolicies();
+  }).catch(err => toast('Failed: ' + err.message, 'error'));
+}
+
+function editPolicy() {
+  if (!App.currentPolicy) return;
+  const p = App.currentPolicy;
+  const c = document.getElementById('content');
+  const rules = p.rules || [];
+  let rulesHtml = '';
+  rules.forEach(r => { rulesHtml += policyRuleInput(r.path, r.capabilities); });
+  if (!rulesHtml) rulesHtml = policyRuleInput();
+
+  c.innerHTML = `
+    <div class="breadcrumb"><a onclick="App.currentPolicy=null;renderPage()">Policies</a><span class="sep">/</span><span>${esc(p.name)}</span><span class="sep">/</span><span>Edit</span></div>
+    <div class="card">
+      <div class="card-header"><h3>Edit Policy: ${esc(p.name)}</h3></div>
+      <div class="form-group"><label>Description</label><input type="text" id="policy-desc" value="${esc(p.description || '')}"/></div>
+      <div id="policy-rules">
+        <label style="font-size:13px;color:#999;margin-bottom:8px;display:block;">Rules</label>
+        ${rulesHtml}
+      </div>
+      <div style="margin-bottom:16px;">
+        <button class="btn btn-secondary btn-sm" onclick="addPolicyRule()">+ Add Rule</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="updatePolicy('${esc(p.name)}')">Save</button>
+        <button class="btn btn-secondary" onclick="renderPage()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function updatePolicy(name) {
+  const desc = document.getElementById('policy-desc').value.trim();
+  const rules = [];
+  document.querySelectorAll('.rule-input').forEach(el => {
+    const path = el.querySelector('.rule-path-input').value.trim();
+    if (!path) return;
+    const caps = [];
+    el.querySelectorAll('.rule-cap:checked').forEach(cb => caps.push(cb.value));
+    rules.push({ path, capabilities: caps });
+  });
+  api('PUT', '/v1/policies/' + encodeURIComponent(name), { policy: { name, description: desc, rules } }).then(() => {
+    toast('Policy updated', 'success');
+    App.currentPolicy = { name, description: desc, rules };
+    renderPage();
+  }).catch(err => toast('Failed: ' + err.message, 'error'));
+}
+
+function deletePolicy(name) {
+  showModal('Delete Policy', 'Are you sure you want to delete policy "' + name + '"?', () => {
+    api('DELETE', '/v1/policies/' + encodeURIComponent(name)).then(() => {
+      toast('Policy deleted', 'success');
+      App.currentPolicy = null;
+      renderPage();
+    }).catch(err => toast('Failed: ' + err.message, 'error'));
+  });
+}
+
+// ── Tokens Page ──────────────────────────────────────────────────────────
+function renderTokens(c) {
+  c.innerHTML = `
+    <div class="section-header"><h2>Token Management</h2></div>
+    <div class="card">
+      <div class="card-header">
+        <h3>Current Token</h3>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-success btn-sm" onclick="renewToken()">Renew</button>
+          <button class="btn btn-danger btn-sm" onclick="revokeToken()">Revoke &amp; Logout</button>
+        </div>
+      </div>
+      <div class="kv-row"><span class="kv-key">Token</span><span class="kv-value masked" data-val="${esc(App.token)}">********</span><span class="kv-toggle" onclick="toggleValue(this)">show</span></div>
+      <div id="token-info" style="margin-top:12px;"><div class="loading-wrap"><div class="spinner"></div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Token Lookup</h3></div>
+      <div style="display:flex;gap:8px;align-items:flex-end;">
+        <div class="form-group" style="flex:1;margin-bottom:0;">
+          <label>Token to Lookup</label>
+          <input type="text" id="lookup-token-input" placeholder="s.xxxxxxxxxx"/>
+        </div>
+        <button class="btn btn-secondary" style="margin-bottom:0;" onclick="lookupToken()">Lookup</button>
+      </div>
+      <div id="lookup-result" style="margin-top:12px;display:none;"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Create New Token</h3></div>
+      <div class="form-group"><label>Policies (comma separated)</label><input type="text" id="token-policies" placeholder="root,my-policy"/></div>
+      <div class="form-group"><label>TTL (e.g. 1h, 30m, 24h)</label><input type="text" id="token-ttl" placeholder="1h" value="1h"/></div>
+      <button class="btn btn-primary" onclick="createToken()">Create Token</button>
+      <div id="new-token-result" style="margin-top:12px;display:none;"></div>
+    </div>`;
+  loadTokenInfo();
+}
+
+function loadTokenInfo() {
+  const container = document.getElementById('token-info');
+  if (!container) return;
+  // Try the token lookup endpoint if it exists, otherwise show basic info
+  api('GET', '/v1/auth/token/lookup-self').then(data => {
+    const info = data.data || data;
+    container.innerHTML = `
+      <div class="kv-row"><span class="kv-key">Status</span><span class="kv-value" style="color:#52b788;">Active</span></div>
+      <div class="kv-row"><span class="kv-key">Token ID</span><span class="kv-value">${esc(info.id || App.token.substring(0, 16) + '...')}</span></div>
+      <div class="kv-row"><span class="kv-key">Policies</span><span class="kv-value">${(info.policies || []).map(p => '<span class="tag">' + esc(p) + '</span>').join(' ') || 'N/A'}</span></div>
+      <div class="kv-row"><span class="kv-key">TTL</span><span class="kv-value">${esc(info.ttl || info.expire_time || 'N/A')}</span></div>
+      <div class="kv-row"><span class="kv-key">Created</span><span class="kv-value">${esc(info.creation_time || 'N/A')}</span></div>`;
+  }).catch(() => {
+    // Fallback - show what we know
+    container.innerHTML = `
+      <div class="kv-row"><span class="kv-key">Status</span><span class="kv-value" style="color:#52b788;">Active</span></div>
+      <div class="kv-row"><span class="kv-key">Token ID</span><span class="kv-value">${esc(App.token.substring(0, 16))}...</span></div>
+      <div class="kv-row"><span class="kv-key">Info</span><span class="kv-value" style="color:#666;">Token lookup endpoint not available.</span></div>`;
+  });
+}
+
+function lookupToken() {
+  const tokenInput = document.getElementById('lookup-token-input').value.trim();
+  if (!tokenInput) { toast('Enter a token to look up', 'error'); return; }
+  const result = document.getElementById('lookup-result');
+  if (!result) return;
+  result.style.display = 'block';
+  result.innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+  api('POST', '/v1/auth/token/lookup', { token: tokenInput }).then(data => {
+    const info = data.data || data;
+    result.innerHTML = `
+      <div style="background:#0f0f1a;border:1px solid #2a2a4a;border-radius:6px;padding:12px;">
+        <div class="kv-row"><span class="kv-key">ID</span><span class="kv-value">${esc(info.id || tokenInput.substring(0, 16) + '...')}</span></div>
+        <div class="kv-row"><span class="kv-key">Policies</span><span class="kv-value">${(info.policies || []).map(p => '<span class="tag">' + esc(p) + '</span>').join(' ') || 'N/A'}</span></div>
+        <div class="kv-row"><span class="kv-key">TTL</span><span class="kv-value">${esc(info.ttl || 'N/A')}</span></div>
+      </div>`;
+  }).catch(err => {
+    result.innerHTML = `<div style="color:#e94560;font-size:13px;">Lookup failed: ${esc(err.message)}</div>`;
+  });
+}
+
+function renewToken() {
+  api('POST', '/v1/auth/token/renew-self').then(data => {
+    toast('Token renewed successfully', 'success');
+    loadTokenInfo();
+  }).catch(err => {
+    toast('Renew not available: ' + err.message, 'error');
+  });
+}
+
+function revokeToken() {
+  showModal('Revoke Token', 'This will revoke your current token and log you out. Continue?', () => {
+    api('POST', '/v1/auth/token/revoke-self').then(() => {
+      toast('Token revoked', 'info');
+      logout();
+    }).catch(() => {
+      // Even if the endpoint doesn't exist, log out
+      logout();
+    });
+  });
+}
+
+function createToken() {
+  const policiesStr = document.getElementById('token-policies').value.trim();
+  const ttl = document.getElementById('token-ttl').value.trim() || '1h';
+  const policyIds = policiesStr ? policiesStr.split(',').map(s => s.trim()) : ['root'];
+  api('POST', '/v1/auth/token/create', { policy_ids: policyIds, ttl }).then(data => {
+    const result = document.getElementById('new-token-result');
+    if (!result) return;
+    const token = data.auth ? data.auth.client_token : 'unknown';
+    const policies = data.auth ? data.auth.policies : policyIds;
+    const tokenTTL = data.auth ? data.auth.ttl : ttl;
+    result.style.display = 'block';
+    result.innerHTML = `
+      <div style="background:#1b4332;border:1px solid #2d6a4f;border-radius:6px;padding:16px;">
+        <div style="font-size:13px;color:#52b788;margin-bottom:8px;font-weight:600;">Token created successfully</div>
+        <div style="font-size:12px;color:#e9c46a;margin-bottom:12px;">Copy this token now. It will not be shown again.</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+          <code style="flex:1;background:#0f0f1a;padding:10px;border-radius:4px;color:#e0e0e0;word-break:break-all;font-size:12px;border:1px solid #2a2a4a;">${esc(token)}</code>
+          <button class="btn btn-secondary btn-sm" onclick="navigator.clipboard.writeText('${esc(token)}');toast('Copied to clipboard','success')">Copy</button>
+        </div>
+        <div style="display:flex;gap:16px;font-size:12px;color:#888;">
+          <span>Policies: ${(Array.isArray(policies) ? policies : [policies]).map(p => '<span class="tag">' + esc(p) + '</span>').join(' ')}</span>
+          <span>TTL: ${esc(String(tokenTTL))}</span>
+        </div>
+      </div>`;
+    toast('Token created', 'success');
+  }).catch(err => toast('Failed to create token: ' + err.message, 'error'));
+}
+
+// ── Audit Page ───────────────────────────────────────────────────────────
+function renderAudit(c) {
+  c.innerHTML = `
+    <div class="section-header">
+      <h2>Audit Log</h2>
+      <button class="btn btn-secondary btn-sm" onclick="App.auditPage=1;loadAuditLog()">Refresh</button>
+    </div>
+    <div class="filters">
+      <div class="form-group"><label>Event Type</label>
+        <select id="audit-type">
+          <option value="">All Types</option>
+          <option value="read">Read</option>
+          <option value="write">Write</option>
+          <option value="delete">Delete</option>
+          <option value="list">List</option>
+          <option value="auth">Auth</option>
+          <option value="policy">Policy</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Path Filter</label><input type="text" id="audit-path" placeholder="e.g. secret/myapp"/></div>
+      <div class="form-group"><label>From</label><input type="datetime-local" id="audit-from" style="color-scheme:dark;"/></div>
+      <div class="form-group"><label>To</label><input type="datetime-local" id="audit-to" style="color-scheme:dark;"/></div>
+      <div class="form-group"><label>&nbsp;</label>
+        <div style="display:flex;gap:4px;">
+          <button class="btn btn-primary btn-sm" onclick="App.auditPage=1;loadAuditLog()">Apply Filters</button>
+          <button class="btn btn-secondary btn-sm" onclick="clearAuditFilters()">Clear</button>
+        </div>
+      </div>
+    </div>
+    <div id="audit-table"><div class="loading-wrap"><div class="spinner"></div></div></div>`;
+  loadAuditLog();
+}
+
+function clearAuditFilters() {
+  const typeEl = document.getElementById('audit-type');
+  const pathEl = document.getElementById('audit-path');
+  const fromEl = document.getElementById('audit-from');
+  const toEl = document.getElementById('audit-to');
+  if (typeEl) typeEl.value = '';
+  if (pathEl) pathEl.value = '';
+  if (fromEl) fromEl.value = '';
+  if (toEl) toEl.value = '';
+  App.auditPage = 1;
+  loadAuditLog();
+}
+
+function loadAuditLog() {
+  const container = document.getElementById('audit-table');
+  if (!container) return;
+  // Build query string from filters
+  const params = new URLSearchParams();
+  params.set('page', App.auditPage);
+  const typeEl = document.getElementById('audit-type');
+  const pathEl = document.getElementById('audit-path');
+  const fromEl = document.getElementById('audit-from');
+  const toEl = document.getElementById('audit-to');
+  if (typeEl && typeEl.value) params.set('type', typeEl.value);
+  if (pathEl && pathEl.value) params.set('path', pathEl.value);
+  if (fromEl && fromEl.value) params.set('from', new Date(fromEl.value).toISOString());
+  if (toEl && toEl.value) params.set('to', new Date(toEl.value).toISOString());
+  container.innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+  // Attempt to fetch audit log
+  api('GET', '/v1/audit/log?' + params.toString()).then(data => {
+    const events = data.events || data || [];
+    renderAuditTable(container, events, data.total || events.length);
+  }).catch(() => {
+    // Audit endpoint not available - show informational message
+    container.innerHTML = `
+      <div class="card" style="text-align:center;color:#666;padding:40px;">
+        <p style="margin-bottom:8px;">Audit logging endpoint not available.</p>
+        <p style="font-size:12px;">The server does not currently expose an audit log API. Audit events are logged server-side.</p>
+      </div>`;
+  });
+}
+
+function renderAuditTable(container, events, total) {
+  if (events.length === 0) {
+    container.innerHTML = '<div class="card" style="text-align:center;color:#666;padding:40px;">No audit events found.</div>';
+    return;
+  }
+  let html = '<div class="table-wrap"><table><thead><tr><th>Time</th><th>Type</th><th>Path</th><th>User</th><th>Status</th></tr></thead><tbody>';
+  events.forEach(e => {
+    html += `<tr>
+      <td>${esc(e.timestamp || e.time || '')}</td>
+      <td><span class="tag">${esc(e.type || e.operation || '')}</span></td>
+      <td><code>${esc(e.path || '')}</code></td>
+      <td>${esc(e.user || e.token_id || '')}</td>
+      <td>${esc(e.status || '')}</td>
+    </tr>`;
+  });
+  html += '</tbody></table></div>';
+  const perPage = 20;
+  const totalPages = Math.ceil(total / perPage) || 1;
+  html += `<div class="pagination">
+    <button class="btn btn-secondary btn-sm" ${App.auditPage <= 1 ? 'disabled' : ''} onclick="App.auditPage--;loadAuditLog()">Prev</button>
+    <span class="page-info">Page ${App.auditPage} of ${totalPages}</span>
+    <button class="btn btn-secondary btn-sm" ${App.auditPage >= totalPages ? 'disabled' : ''} onclick="App.auditPage++;loadAuditLog()">Next</button>
+  </div>`;
+  container.innerHTML = html;
+}
+
+// ── System Page ──────────────────────────────────────────────────────────
+function renderSystem(c) {
+  c.innerHTML = `
+    <div class="section-header">
+      <h2>System</h2>
+      <button class="btn btn-secondary btn-sm" onclick="renderSystem(document.getElementById('content'))">Refresh</button>
+    </div>
+    <div class="status-grid" id="status-grid">
+      <div class="status-card"><div class="value" id="sys-health"><div class="spinner"></div></div><div class="label">Health</div></div>
+      <div class="status-card"><div class="value" id="sys-seal">${App.sealStatus.sealed ? '<span class="error">Sealed</span>' : '<span class="ok">Unsealed</span>'}</div><div class="label">Seal Status</div></div>
+      <div class="status-card"><div class="value ok" id="sys-version">-</div><div class="label">Version</div></div>
+      <div class="status-card"><div class="value ok" id="sys-storage">-</div><div class="label">Storage</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <h3>Health Check</h3>
+        <button class="btn btn-secondary btn-sm" onclick="loadHealth()">Re-check</button>
+      </div>
+      <div id="health-detail"><div class="loading-wrap"><div class="spinner"></div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Seal / Unseal Controls</h3></div>
+      <p style="color:#999;font-size:13px;margin-bottom:16px;">
+        Sealing the vault encrypts the master key in memory and prevents all read/write operations.
+        Unsealing requires providing the configured threshold of unseal key shares.
+      </p>
+      <div style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn btn-danger" onclick="sealVault()" ${App.sealStatus.sealed ? 'disabled' : ''}>
+          ${App.sealStatus.sealed ? 'Already Sealed' : 'Seal Vault'}
+        </button>
+        <button class="btn btn-success" onclick="toggleUnsealForm()" ${!App.sealStatus.sealed ? '' : ''}>
+          Unseal Vault
+        </button>
+      </div>
+      <div id="unseal-form" style="display:none;">
+        <div style="background:#0f0f1a;border:1px solid #2a2a4a;border-radius:6px;padding:16px;">
+          <div class="form-group">
+            <label>Unseal Key</label>
+            <input type="text" id="unseal-key" placeholder="Enter unseal key share"/>
+          </div>
+          <div id="unseal-progress-bar" style="margin-bottom:12px;">
+            <div style="font-size:12px;color:#666;margin-bottom:4px;">Progress: <span id="unseal-count">0</span> / <span id="unseal-threshold">?</span> keys provided</div>
+            <div style="height:4px;background:#2a2a4a;border-radius:2px;overflow:hidden;">
+              <div id="unseal-bar" style="height:100%;background:#00b4d8;width:0%;transition:width .3s;"></div>
+            </div>
+          </div>
+          <button class="btn btn-success" onclick="submitUnseal()">Submit Key</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Server Information</h3></div>
+      <div id="server-info"><div class="loading-wrap"><div class="spinner"></div></div></div>
+    </div>`;
+  loadHealth();
+  loadServerInfo();
+}
+
+function loadHealth() {
+  api('GET', '/v1/health').then(data => {
+    App.healthData = data;
+    const el = document.getElementById('sys-health');
+    if (el) el.innerHTML = '<span class="ok">Healthy</span>';
+    const ver = document.getElementById('sys-version');
+    if (ver) ver.textContent = data.version || '1.0';
+    const storage = document.getElementById('sys-storage');
+    if (storage) storage.textContent = data.storage_type || 'file';
+    if (data.sealed !== undefined) {
+      App.sealStatus.sealed = data.sealed;
+      const sealEl = document.getElementById('sys-seal');
+      if (sealEl) sealEl.innerHTML = data.sealed ? '<span class="error">Sealed</span>' : '<span class="ok">Unsealed</span>';
+    }
+    const detail = document.getElementById('health-detail');
+    if (detail) {
+      const timestamp = new Date().toISOString();
+      detail.innerHTML = `
+        <div class="kv-row"><span class="kv-key">Status</span><span class="kv-value" style="color:#52b788;">${esc(data.status || 'ok')}</span></div>
+        <div class="kv-row"><span class="kv-key">Checked At</span><span class="kv-value">${esc(timestamp)}</span></div>
+        <div style="margin-top:12px;">
+          <details>
+            <summary style="cursor:pointer;color:#666;font-size:12px;">Raw response</summary>
+            <pre style="color:#999;font-size:12px;white-space:pre-wrap;margin-top:8px;background:#0f0f1a;padding:12px;border-radius:6px;">${esc(JSON.stringify(data, null, 2))}</pre>
+          </details>
+        </div>`;
+    }
+  }).catch(err => {
+    const el = document.getElementById('sys-health');
+    if (el) el.innerHTML = '<span class="error">Unhealthy</span>';
+    const detail = document.getElementById('health-detail');
+    if (detail) detail.innerHTML = `<div style="color:#e94560;padding:8px;">Health check failed: ${esc(err.message)}</div>`;
+  });
+}
+
+function loadServerInfo() {
+  const container = document.getElementById('server-info');
+  if (!container) return;
+  // Build info from what we know
+  container.innerHTML = `
+    <div class="kv-row"><span class="kv-key">API Base</span><span class="kv-value"><code>${esc(window.location.origin)}</code></span></div>
+    <div class="kv-row"><span class="kv-key">UI Path</span><span class="kv-value"><code>/ui/</code></span></div>
+    <div class="kv-row"><span class="kv-key">API Version</span><span class="kv-value">v1</span></div>
+    <div class="kv-row"><span class="kv-key">Client Time</span><span class="kv-value">${new Date().toLocaleString()}</span></div>`;
+}
+
+function sealVault() {
+  showModal('Seal Vault', 'Are you sure you want to seal the vault? All secret operations will be suspended until the vault is unsealed.', () => {
+    api('POST', '/v1/sys/seal').then(() => {
+      App.sealStatus.sealed = true;
+      toast('Vault sealed', 'info');
+      render();
+    }).catch(err => toast('Seal operation not available: ' + err.message, 'error'));
+  });
+}
+
+function toggleUnsealForm() {
+  const form = document.getElementById('unseal-form');
+  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+function submitUnseal() {
+  const key = document.getElementById('unseal-key').value.trim();
+  if (!key) { toast('Enter an unseal key', 'error'); return; }
+  api('POST', '/v1/sys/unseal', { key }).then(data => {
+    document.getElementById('unseal-key').value = '';
+    if (data && data.sealed === false) {
+      App.sealStatus.sealed = false;
+      toast('Vault unsealed successfully', 'success');
+      render();
+    } else if (data && data.progress !== undefined) {
+      const count = document.getElementById('unseal-count');
+      const threshold = document.getElementById('unseal-threshold');
+      const bar = document.getElementById('unseal-bar');
+      if (count) count.textContent = data.progress;
+      if (threshold) threshold.textContent = data.threshold || '?';
+      if (bar && data.threshold) bar.style.width = (data.progress / data.threshold * 100) + '%';
+      toast('Key accepted (' + data.progress + '/' + (data.threshold || '?') + ')', 'info');
+    } else {
+      App.sealStatus.sealed = false;
+      toast('Vault unsealed', 'success');
+      render();
+    }
+  }).catch(err => toast('Unseal failed: ' + err.message, 'error'));
+}
+
+// ── Keyboard Shortcuts ───────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  // Don't trigger shortcuts when typing in inputs
+  if (e.target.matches('input, textarea, select')) return;
+
+  if (e.key === '1') navigate('secrets');
+  if (e.key === '2') navigate('policies');
+  if (e.key === '3') navigate('tokens');
+  if (e.key === '4') navigate('audit');
+  if (e.key === '5') navigate('system');
+  if (e.key === 'Escape') {
+    // Close modals
+    document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
+    // Back from detail views
+    if (App.currentSecret) { App.currentSecret = null; renderPage(); }
+    else if (App.currentPolicy) { App.currentPolicy = null; renderPage(); }
+  }
+  if (e.key === '/' && App.token) {
+    e.preventDefault();
+    const search = document.getElementById('secret-search');
+    if (search) search.focus();
+  }
+});
+
+// ── Periodic health check (every 60s when logged in) ────────────────────
+setInterval(() => {
+  if (!App.token) return;
+  fetch('/v1/health').then(r => r.json()).then(data => {
+    if (data.sealed !== undefined && data.sealed !== App.sealStatus.sealed) {
+      App.sealStatus.sealed = data.sealed;
+      render();
+    }
+  }).catch(() => {});
+}, 60000);
+
+// ── Init ─────────────────────────────────────────────────────────────────
+render();
+</script>
+</body>
+</html>

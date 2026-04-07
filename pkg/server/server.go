@@ -3,6 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -18,9 +21,16 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"securevault/pkg/audit"
+	vaulterrors "securevault/pkg/errors"
 	"securevault/pkg/policy"
+	"securevault/pkg/seal"
 	"securevault/pkg/storage"
+	"securevault/pkg/ui"
 )
+
+// MaxRequestBodySize is the maximum allowed request body size (1 MB)
+const MaxRequestBodySize = 1 << 20
 
 // Config represents the server configuration
 type Config struct {
@@ -44,14 +54,37 @@ type Config struct {
 	} `yaml:"auth"`
 
 	Replication struct {
-		Mode        string   `yaml:"mode"`
-		ClusterAddr string   `yaml:"cluster_addr"`
-		Peers       []string `yaml:"peers"`
+		Mode          string   `yaml:"mode"`
+		ClusterAddr   string   `yaml:"cluster_addr"`
+		Peers         []string `yaml:"peers"`
+		SharedSecret  string   `yaml:"shared_secret"`
 	} `yaml:"replication"`
+
+	Seal struct {
+		SecretShares    int `yaml:"secret_shares"`
+		SecretThreshold int `yaml:"secret_threshold"`
+	} `yaml:"seal"`
+
+	RateLimit struct {
+		Enabled       bool    `yaml:"enabled"`
+		RequestsPerSec float64 `yaml:"requests_per_sec"`
+		Burst         int     `yaml:"burst"`
+	} `yaml:"rate_limit"`
+
+	Audit struct {
+		Enabled bool   `yaml:"enabled"`
+		Path    string `yaml:"path"`
+	} `yaml:"audit"`
+
+	Logging struct {
+		Level  string `yaml:"level"`
+		Format string `yaml:"format"`
+	} `yaml:"logging"`
 }
 
-// ReplicationEntry represents a change in data that needs to be replicated
+// ReplicationEntry represents a change that needs to be replicated
 type ReplicationEntry struct {
+	ID        int64                  `json:"id"`
 	Operation string                 `json:"op"`
 	Path      string                 `json:"path"`
 	Data      map[string]interface{} `json:"data,omitempty"`
@@ -67,19 +100,66 @@ type Server struct {
 	httpServer         *http.Server
 	replicationServer  *http.Server
 	policies           *policy.Manager
+	sealManager        *seal.Manager
+	auditLogger        audit.Logger
 	tokens             map[string]TokenInfo
 	tokenMutex         sync.RWMutex
 	replicationLog     []ReplicationEntry
 	repLogMutex        sync.RWMutex
+	repLogNextID       int64
 	replicationStarted bool
 	replicationReady   chan struct{}
+	rateLimiter        *RateLimiter
+	tokenStorePath     string
 }
 
 // TokenInfo represents information about an authentication token
 type TokenInfo struct {
-	ID        string
-	PolicyIDs []string
-	ExpiresAt time.Time
+	ID        string   `json:"id"`
+	PolicyIDs []string `json:"policy_ids"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RateLimiter implements a simple token bucket rate limiter
+type RateLimiter struct {
+	mu       sync.Mutex
+	tokens   float64
+	max      float64
+	rate     float64
+	lastTime time.Time
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(rate float64, burst int) *RateLimiter {
+	return &RateLimiter{
+		tokens:   float64(burst),
+		max:      float64(burst),
+		rate:     rate,
+		lastTime: time.Now(),
+	}
+}
+
+// Allow checks if a request is allowed
+func (rl *RateLimiter) Allow() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(rl.lastTime).Seconds()
+	rl.lastTime = now
+
+	rl.tokens += elapsed * rl.rate
+	if rl.tokens > rl.max {
+		rl.tokens = rl.max
+	}
+
+	if rl.tokens < 1 {
+		return false
+	}
+
+	rl.tokens--
+	return true
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -94,22 +174,43 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Set defaults
+	if config.Auth.TokenTTL == "" {
+		config.Auth.TokenTTL = "1h"
+	}
+	if config.Seal.SecretShares == 0 {
+		config.Seal.SecretShares = 5
+	}
+	if config.Seal.SecretThreshold == 0 {
+		config.Seal.SecretThreshold = 3
+	}
+
 	return &config, nil
 }
 
 // NewServer creates a new SecureVault server
 func NewServer(config *Config) (*Server, error) {
-	// Initialize storage backend based on configuration
+	// Initialize seal manager
+	sealMgr := seal.NewManager(config.Storage.Path)
+	if err := sealMgr.LoadState(); err != nil {
+		return nil, fmt.Errorf("failed to load seal state: %w", err)
+	}
+
+	// Create encryption key provider that gets key from seal manager
+	keyProvider := func() ([]byte, error) {
+		return sealMgr.GetEncryptionKey()
+	}
+
+	// Initialize storage backend
 	var storageBackend storage.Backend
 	var err error
 
 	switch config.Storage.Type {
 	case "file":
-		// Ensure storage directory exists
 		if err := os.MkdirAll(config.Storage.Path, 0700); err != nil {
 			return nil, fmt.Errorf("failed to create storage directory: %w", err)
 		}
-		storageBackend, err = storage.NewFileBackend(config.Storage.Path)
+		storageBackend, err = storage.NewFileBackend(config.Storage.Path, keyProvider)
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", config.Storage.Type)
 	}
@@ -123,43 +224,104 @@ func NewServer(config *Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize policy manager: %w", err)
 	}
-	// Set up HTTP server
-	mux := http.NewServeMux()
+
+	// Initialize audit logger
+	var auditLog audit.Logger
+	if config.Audit.Enabled {
+		auditPath := config.Audit.Path
+		if auditPath == "" {
+			auditPath = filepath.Join(config.Storage.Path, "audit", "audit.log")
+		}
+		if err := os.MkdirAll(filepath.Dir(auditPath), 0700); err != nil {
+			return nil, fmt.Errorf("failed to create audit directory: %w", err)
+		}
+		auditLog, err = audit.NewFileLogger(auditPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize audit logger: %w", err)
+		}
+	} else {
+		auditLog = &audit.NopLogger{}
+	}
+
+	// Initialize rate limiter
+	var limiter *RateLimiter
+	if config.RateLimit.Enabled {
+		rate := config.RateLimit.RequestsPerSec
+		if rate <= 0 {
+			rate = 100
+		}
+		burst := config.RateLimit.Burst
+		if burst <= 0 {
+			burst = 200
+		}
+		limiter = NewRateLimiter(rate, burst)
+	}
+
 	server := &Server{
 		config:           config,
 		storage:          storageBackend,
 		policies:         policyManager,
+		sealManager:      sealMgr,
+		auditLogger:      auditLog,
 		tokens:           make(map[string]TokenInfo),
 		replicationLog:   make([]ReplicationEntry, 0),
 		replicationReady: make(chan struct{}),
+		rateLimiter:      limiter,
+		tokenStorePath:   filepath.Join(config.Storage.Path, "tokens.enc"),
 	}
 
-	// Initialize HTTP server
+	// Set up HTTP server
+	mux := http.NewServeMux()
 	server.httpServer = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", config.Server.Address, config.Server.Port),
-		Handler: mux,
+		Addr:         fmt.Sprintf("%s:%d", config.Server.Address, config.Server.Port),
+		Handler:      server.middleware(mux),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	// Register API endpoints
 	// Register API endpoints
 	mux.HandleFunc("GET /v1/health", server.healthCheckHandler)
+
+	// System endpoints (available even when sealed)
+	mux.HandleFunc("GET /v1/sys/seal-status", server.sealStatusHandler)
+	mux.HandleFunc("POST /v1/sys/init", server.initHandler)
+	mux.HandleFunc("POST /v1/sys/unseal", server.unsealHandler)
+	mux.HandleFunc("POST /v1/sys/seal", server.sealHandler)
+	mux.HandleFunc("GET /v1/sys/status", server.systemStatusHandler)
+	mux.HandleFunc("GET /v1/sys/replication/status", server.replicationStatusHandler)
+
+	// Secret endpoints
 	mux.HandleFunc("POST /v1/secret/{path...}", server.writeSecretHandler)
-	mux.HandleFunc("GET /v1/secret/{path...}", server.readSecretHandler)
-	mux.HandleFunc("DELETE /v1/secret/{path...}", server.deleteSecretHandler)
 	mux.HandleFunc("GET /v1/secret/metadata/{path...}", server.getSecretMetadataHandler)
 	mux.HandleFunc("GET /v1/secret/versions/{version}/{path...}", server.getSecretVersionHandler)
 	mux.HandleFunc("GET /v1/secret/list/{path...}", server.listSecretsHandler)
+	mux.HandleFunc("GET /v1/secret/{path...}", server.readSecretHandler)
+	mux.HandleFunc("DELETE /v1/secret/{path...}", server.deleteSecretHandler)
+
+	// Policy endpoints
 	mux.HandleFunc("POST /v1/policies", server.createPolicyHandler)
 	mux.HandleFunc("GET /v1/policies/{name}", server.getPolicyHandler)
 	mux.HandleFunc("PUT /v1/policies/{name}", server.updatePolicyHandler)
 	mux.HandleFunc("DELETE /v1/policies/{name}", server.deletePolicyHandler)
 	mux.HandleFunc("GET /v1/policies", server.listPoliciesHandler)
-	mux.HandleFunc("POST /v1/auth/token/create", server.createTokenHandler)
 
-	// Replication endpoints
+	// Token endpoints
+	mux.HandleFunc("POST /v1/auth/token/create", server.createTokenHandler)
+	mux.HandleFunc("GET /v1/auth/token/lookup-self", server.lookupTokenHandler)
+	mux.HandleFunc("POST /v1/auth/token/renew-self", server.renewTokenHandler)
+	mux.HandleFunc("POST /v1/auth/token/revoke-self", server.revokeTokenHandler)
+
+	// Audit endpoint
+	mux.HandleFunc("GET /v1/audit/events", server.auditEventsHandler)
+
+	// Replication endpoint
 	mux.HandleFunc("POST /v1/replication/data", server.handleReplicationData)
 
-	// Create root policy for initial setup
+	// Web UI - serve at /ui/ with SPA routing
+	mux.Handle("/ui/", http.StripPrefix("/ui", ui.Handler()))
+
+	// Create root policy
 	rootPolicy := &policy.Policy{
 		Name:        "root",
 		Description: "Root policy with full access",
@@ -177,61 +339,96 @@ func NewServer(config *Config) (*Server, error) {
 		},
 	}
 
-	// Silently ignore if the policy already exists
 	if err := server.policies.CreatePolicy(rootPolicy); err != nil {
-		if !strings.Contains(err.Error(), "already exists") {
+		if !vaulterrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("failed to create root policy: %w", err)
 		}
-		// Policy already exists, which is fine
 	}
 
-	// Seed with a root token in test mode
-	if os.Getenv("TEST_MODE") == "true" {
-		server.tokens["s.root"] = TokenInfo{
-			ID:        "s.root",
-			PolicyIDs: []string{"root"},
-			ExpiresAt: time.Now().Add(24 * time.Hour),
-		}
+	// Load persisted tokens if vault is unsealed
+	if !sealMgr.IsSealed() {
+		server.loadTokens()
 	}
 
 	return server, nil
 }
 
-// Start starts the server
-func (s *Server) Start() error {
-	// Initialize replication server if in leader or follower mode
-	if s.config.Replication.Mode == "leader" || s.config.Replication.Mode == "follower" {
-		// Create a separate mux for replication endpoints
-		replicationMux := http.NewServeMux()
-
-		// Register replication handlers
-		replicationMux.HandleFunc("/v1/replication/status", s.replicationStatusHandler)
-		replicationMux.HandleFunc("/v1/replication/data", s.replicationDataHandler)
-
-		// Create replication server
-		s.replicationServer = &http.Server{
-			Addr:    s.config.Replication.ClusterAddr,
-			Handler: replicationMux,
+// middleware wraps handlers with rate limiting and request size limits
+func (s *Server) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Rate limiting
+		if s.rateLimiter != nil && !s.rateLimiter.Allow() {
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
 		}
 
-		// Start replication server in a separate goroutine
+		// Request body size limit
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireUnseal is a helper that checks if the vault is unsealed
+func (s *Server) requireUnseal(w http.ResponseWriter) bool {
+	if s.sealManager.IsSealed() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "vault is sealed",
+			"sealed": true,
+		})
+		return false
+	}
+	return true
+}
+
+// Start starts the server
+func (s *Server) Start() error {
+	// Initialize replication
+	if s.config.Replication.Mode == "leader" || s.config.Replication.Mode == "follower" {
+		replicationMux := http.NewServeMux()
+		replicationMux.HandleFunc("/v1/replication/status", s.replicationClusterStatusHandler)
+		replicationMux.HandleFunc("/v1/replication/data", s.replicationDataHandler)
+
+		s.replicationServer = &http.Server{
+			Addr:    s.config.Replication.ClusterAddr,
+			Handler: s.replicationAuthMiddleware(replicationMux),
+		}
+
 		go func() {
 			log.Printf("Starting replication server on %s", s.config.Replication.ClusterAddr)
-			// Signal that replication server is starting
 			s.replicationStarted = true
 
-			if err := s.replicationServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("Replication server error: %v", err)
+			// Use TLS for replication if TLS is enabled
+			if s.config.Server.TLS.Enabled {
+				cert, err := tls.LoadX509KeyPair(s.config.Server.TLS.CertFile, s.config.Server.TLS.KeyFile)
+				if err != nil {
+					log.Printf("Replication TLS error: %v, falling back to plaintext", err)
+					if err := s.replicationServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						log.Printf("Replication server error: %v", err)
+					}
+					return
+				}
+				s.replicationServer.TLSConfig = &tls.Config{
+					Certificates: []tls.Certificate{cert},
+					MinVersion:   tls.VersionTLS12,
+				}
+				if err := s.replicationServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					log.Printf("Replication server error: %v", err)
+				}
+			} else {
+				if err := s.replicationServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("Replication server error: %v", err)
+				}
 			}
 		}()
 
-		// Give the replication server time to start
 		time.Sleep(500 * time.Millisecond)
-
-		// Signal that replication server is ready
 		close(s.replicationReady)
 
-		// Start replication sync for leader nodes
 		if s.config.Replication.Mode == "leader" && len(s.config.Replication.Peers) > 0 {
 			go s.startReplicationSync()
 		}
@@ -256,40 +453,228 @@ func (s *Server) Start() error {
 	return s.httpServer.ListenAndServe()
 }
 
+// SealManager returns the seal manager
+func (s *Server) SealManager() *seal.Manager {
+	return s.sealManager
+}
+
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	var errors []error
+	var errs []error
 
-	// Shutdown the main HTTP server
-	if err := s.httpServer.Shutdown(ctx); err != nil {
-		errors = append(errors, fmt.Errorf("error shutting down HTTP server: %w", err))
-	}
+	// Persist tokens before shutdown
+	s.persistTokens()
 
-	// Shutdown the replication server if it exists
-	if s.replicationServer != nil && s.replicationStarted {
-		if err := s.replicationServer.Shutdown(ctx); err != nil {
-			errors = append(errors, fmt.Errorf("error shutting down replication server: %w", err))
+	// Close audit logger
+	if s.auditLogger != nil {
+		if err := s.auditLogger.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("error closing audit logger: %w", err))
 		}
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("shutdown errors: %v", errors)
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("error shutting down HTTP server: %w", err))
+	}
+
+	if s.replicationServer != nil && s.replicationStarted {
+		if err := s.replicationServer.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("error shutting down replication server: %w", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown errors: %v", errs)
 	}
 
 	return nil
 }
 
-// healthCheckHandler handles health check requests
+// --- Token persistence ---
+
+func (s *Server) persistTokens() {
+	s.tokenMutex.RLock()
+	defer s.tokenMutex.RUnlock()
+
+	if s.sealManager.IsSealed() {
+		return
+	}
+
+	data, err := json.Marshal(s.tokens)
+	if err != nil {
+		log.Printf("Failed to marshal tokens: %v", err)
+		return
+	}
+
+	key, err := s.sealManager.GetEncryptionKey()
+	if err != nil {
+		log.Printf("Failed to get encryption key for token persistence: %v", err)
+		return
+	}
+
+	encrypted, err := encryptData(key, data)
+	if err != nil {
+		log.Printf("Failed to encrypt tokens: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(s.tokenStorePath, encrypted, 0600); err != nil {
+		log.Printf("Failed to persist tokens: %v", err)
+	}
+}
+
+func (s *Server) loadTokens() {
+	data, err := os.ReadFile(s.tokenStorePath)
+	if err != nil {
+		return // No persisted tokens
+	}
+
+	key, err := s.sealManager.GetEncryptionKey()
+	if err != nil {
+		log.Printf("Failed to get encryption key for token loading: %v", err)
+		return
+	}
+
+	decrypted, err := decryptData(key, data)
+	if err != nil {
+		log.Printf("Failed to decrypt tokens: %v", err)
+		return
+	}
+
+	var tokens map[string]TokenInfo
+	if err := json.Unmarshal(decrypted, &tokens); err != nil {
+		log.Printf("Failed to unmarshal tokens: %v", err)
+		return
+	}
+
+	s.tokenMutex.Lock()
+	defer s.tokenMutex.Unlock()
+
+	// Only load non-expired tokens
+	now := time.Now()
+	for id, info := range tokens {
+		if now.Before(info.ExpiresAt) {
+			s.tokens[id] = info
+		}
+	}
+
+	log.Printf("Loaded %d persisted tokens", len(s.tokens))
+}
+
+// --- System handlers ---
+
 func (s *Server) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	status := "ok"
+	httpStatus := http.StatusOK
+	if s.sealManager.IsSealed() {
+		status = "sealed"
+		httpStatus = http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ok",
+	w.WriteHeader(httpStatus)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      status,
+		"initialized": s.sealManager.IsInitialized(),
+		"sealed":      s.sealManager.IsSealed(),
 	})
 }
 
-// createTokenHandler creates a new authentication token
-func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+func (s *Server) sealStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.sealManager.GetStatus())
+}
+
+func (s *Server) initHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SecretShares    int `json:"secret_shares"`
+		SecretThreshold int `json:"secret_threshold"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.SecretShares == 0 {
+		req.SecretShares = s.config.Seal.SecretShares
+	}
+	if req.SecretThreshold == 0 {
+		req.SecretThreshold = s.config.Seal.SecretThreshold
+	}
+
+	resp, err := s.sealManager.Initialize(req.SecretShares, req.SecretThreshold)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to initialize: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Store the root token
+	s.tokenMutex.Lock()
+	s.tokens[resp.RootToken] = TokenInfo{
+		ID:        resp.RootToken,
+		PolicyIDs: []string{"root"},
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		CreatedAt: time.Now(),
+	}
+	s.tokenMutex.Unlock()
+
+	s.persistTokens()
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventInit,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key string `json:"key"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	unsealed, err := s.sealManager.SubmitUnsealKey(req.Key)
+	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventUnseal,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
+		http.Error(w, fmt.Sprintf("Unseal failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if unsealed {
+		// Load persisted tokens now that we're unsealed
+		s.loadTokens()
+
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventUnseal,
+			RemoteAddr: r.RemoteAddr,
+			Success:    true,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.sealManager.GetStatus())
+}
+
+func (s *Server) sealHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	// Require authentication to seal
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -297,15 +682,66 @@ func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For TestPolicyEnforcement compatibility - don't check permission for any token in test mode
-	if os.Getenv("TEST_MODE") == "true" || os.Getenv("TESTING") == "true" {
-		// In test mode, skip permission check
-	} else {
-		// In normal mode, check permissions
-		if !s.checkPermission(tokenInfo, "auth/token/create", policy.CreateCapability) {
-			http.Error(w, "Permission denied", http.StatusForbidden)
-			return
-		}
+	// Only root policy can seal
+	if !s.checkPermission(tokenInfo, "sys/seal", policy.UpdateCapability) {
+		http.Error(w, "Permission denied", http.StatusForbidden)
+		return
+	}
+
+	// Persist tokens before sealing
+	s.persistTokens()
+
+	if err := s.sealManager.Seal(); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to seal: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSeal,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.sealManager.GetStatus())
+}
+
+func (s *Server) systemStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"sealed":      s.sealManager.IsSealed(),
+		"initialized": s.sealManager.IsInitialized(),
+		"replication": s.config.Replication.Mode,
+		"server_addr": fmt.Sprintf("%s:%d", s.config.Server.Address, s.config.Server.Port),
+	})
+}
+
+// --- Token handlers ---
+
+func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	tokenID := r.Header.Get("X-Vault-Token")
+	tokenInfo, err := s.validateToken(tokenID)
+	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	if !s.checkPermission(tokenInfo, "auth/token/create", policy.CreateCapability) {
+		http.Error(w, "Permission denied", http.StatusForbidden)
+		return
 	}
 
 	var req struct {
@@ -318,10 +754,13 @@ func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate token
-	token := "s.test-generated-token-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	// Generate cryptographically secure token
+	newToken, err := seal.GenerateToken()
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
 
-	// Calculate token expiration
 	ttl := s.config.Auth.TokenTTL
 	if req.TTL != "" {
 		ttl = req.TTL
@@ -333,30 +772,43 @@ func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store token
+	now := time.Now()
 	s.tokenMutex.Lock()
-	s.tokens[token] = TokenInfo{
-		ID:        token,
+	s.tokens[newToken] = TokenInfo{
+		ID:        newToken,
 		PolicyIDs: req.PolicyIDs,
-		ExpiresAt: time.Now().Add(duration),
+		ExpiresAt: now.Add(duration),
+		CreatedAt: now,
 	}
 	s.tokenMutex.Unlock()
 
-	// Send response with HTTP 200 OK (crucial for TestPolicyEnforcement)
+	s.persistTokens()
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventTokenCreate,
+		TokenID:    tokenID,
+		PolicyIDs:  req.PolicyIDs,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"auth": map[string]interface{}{
-			"client_token": token,
+			"client_token": newToken,
 			"policies":     req.PolicyIDs,
 			"ttl":          ttl,
 		},
 	})
 }
 
-// writeSecretHandler handles secret write requests
-func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+func (s *Server) lookupTokenHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -364,52 +816,160 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventTokenLookup,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": map[string]interface{}{
+			"id":          tokenInfo.ID,
+			"policies":    tokenInfo.PolicyIDs,
+			"expire_time": tokenInfo.ExpiresAt.Format(time.RFC3339),
+			"created_at":  tokenInfo.CreatedAt.Format(time.RFC3339),
+			"ttl":         int(time.Until(tokenInfo.ExpiresAt).Seconds()),
+		},
+	})
+}
+
+func (s *Server) renewTokenHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	tokenID := r.Header.Get("X-Vault-Token")
+	_, err := s.validateToken(tokenID)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		TTL string `json:"ttl,omitempty"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	ttl := s.config.Auth.TokenTTL
+	if req.TTL != "" {
+		ttl = req.TTL
+	}
+
+	duration, err := time.ParseDuration(ttl)
+	if err != nil {
+		http.Error(w, "Invalid TTL format", http.StatusBadRequest)
+		return
+	}
+
+	s.tokenMutex.Lock()
+	if info, exists := s.tokens[tokenID]; exists {
+		info.ExpiresAt = time.Now().Add(duration)
+		s.tokens[tokenID] = info
+	}
+	s.tokenMutex.Unlock()
+
+	s.persistTokens()
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventTokenRenew,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) revokeTokenHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	tokenID := r.Header.Get("X-Vault-Token")
+	_, err := s.validateToken(tokenID)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	s.tokenMutex.Lock()
+	delete(s.tokens, tokenID)
+	s.tokenMutex.Unlock()
+
+	s.persistTokens()
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventTokenRevoke,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Secret handlers ---
+
+func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	tokenID := r.Header.Get("X-Vault-Token")
+	tokenInfo, err := s.validateToken(tokenID)
+	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
 	path := r.PathValue("path")
 
-	// Check policy permissions
-	if !s.checkPermission(tokenInfo, path, policy.UpdateCapability) {
+	// Check if secret exists to determine create vs update capability
+	_, metaErr := s.storage.GetSecretMetadata(path)
+	isNew := vaulterrors.IsNotFound(metaErr)
+
+	requiredCap := policy.UpdateCapability
+	if isNew {
+		requiredCap = policy.CreateCapability
+	}
+
+	if !s.checkPermission(tokenInfo, path, requiredCap) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Read and parse request body
 	var reqBody map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Extracting data from request body
 	secretData, ok := reqBody["data"].(map[string]interface{})
 	if !ok {
-		// If "data" isn't a map, try using the whole request body as the data
 		secretData = reqBody
 	}
 
-	// Extract metadata if present
 	var metadata map[string]interface{}
 	if metaRaw, hasMetadata := reqBody["metadata"].(map[string]interface{}); hasMetadata {
 		metadata = metaRaw
 	}
-	// Check if the secret already exists to track versions properly
-	existingMeta, err := s.storage.GetSecretMetadata(path)
 
-	// Create metadata map for storage if not provided
 	if metadata == nil {
 		metadata = make(map[string]interface{})
 	}
 
-	// Add version information to metadata
-	nextVersion := 1
-	if err == nil && existingMeta != nil {
-		nextVersion = existingMeta.CurrentVersion + 1
-	}
-
-	// Explicitly set both version and current_version as float64 for JSON compatibility
-	metadata["version"] = float64(nextVersion)
-	metadata["current_version"] = float64(nextVersion)
-
-	// Store the secret with the extracted data and version metadata
 	err = s.storage.WriteSecret(path, secretData, storage.WriteOptions{
 		UserID:   tokenID,
 		Metadata: metadata,
@@ -419,60 +979,29 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add to replication log if in leader mode
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretWrite,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	// Replicate
 	if s.config.Replication.Mode == "leader" {
-		s.repLogMutex.Lock()
-		s.replicationLog = append(s.replicationLog, ReplicationEntry{
-			Operation: "write",
-			Path:      path,
-			Data:      secretData,
-			Metadata:  metadata,
-			Timestamp: time.Now().Unix(),
-			Version:   nextVersion,
-		})
-		s.repLogMutex.Unlock()
+		s.addReplicationEntry("write", path, secretData, metadata)
+		s.replicateToFollowers(path, secretData, metadata)
 	}
 
-	// If running as a leader, replicate data to followers
-	if s.config.Replication.Mode == "leader" && len(s.config.Replication.Peers) > 0 {
-		// Create a wait group to track replication status
-		var wg sync.WaitGroup
-		errors := make(chan error, len(s.config.Replication.Peers))
-
-		// Replicate to all peers
-		for _, peer := range s.config.Replication.Peers {
-			wg.Add(1)
-			go func(peer string) {
-				defer wg.Done()
-				if err := s.syncToFollower(peer, path, secretData, metadata); err != nil {
-					errors <- fmt.Errorf("failed to replicate to %s: %v", peer, err)
-				}
-			}(peer)
-		}
-
-		// Wait for all replications to complete
-		wg.Wait()
-		close(errors)
-
-		// Check for replication errors
-		var replicationErrors []string
-		for err := range errors {
-			replicationErrors = append(replicationErrors, err.Error())
-		}
-
-		if len(replicationErrors) > 0 {
-			log.Printf("Replication errors: %v", strings.Join(replicationErrors, "; "))
-		}
-	}
-
-	// For HTTP 204 No Content, we must not send a response body
-	// Just return 204 status code without any content
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// readSecretHandler handles secret read requests
 func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -482,31 +1011,35 @@ func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
 
 	path := r.PathValue("path")
 
-	// Check policy permissions
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Retrieve the secret from storage
-	secret, err := s.storage.ReadSecret(path, storage.ReadOptions{
-		// By default, get the latest version
-		Version: 0,
-	})
-
+	secret, err := s.storage.ReadSecret(path, storage.ReadOptions{Version: 0})
 	if err != nil {
-		// Only return 404 for "not found" errors, otherwise 500
 		statusCode := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "not found") {
+		if vaulterrors.IsNotFound(err) {
 			statusCode = http.StatusNotFound
+		} else if vaulterrors.IsVersionDestroyed(err) {
+			statusCode = http.StatusGone
 		}
+
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretRead,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, fmt.Sprintf("Failed to read secret: %v", err), statusCode)
 		return
 	}
-	// Get metadata to include current_version info
+
 	metadata, _ := s.storage.GetSecretMetadata(path)
 
-	// Format response
 	response := map[string]interface{}{
 		"data": secret.Data,
 		"metadata": map[string]interface{}{
@@ -516,23 +1049,29 @@ func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Add current_version from metadata if available
 	if metadata != nil {
 		metaMap := response["metadata"].(map[string]interface{})
-		// Always use float64 for version numbers to match JSON expectations
-		metaMap["current_version"] = float64(metadata.CurrentVersion)
-		// Always use the secret's version for version field
-		metaMap["version"] = float64(secret.Version)
+		metaMap["current_version"] = metadata.CurrentVersion
 	}
 
-	// Send response
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretRead,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// deleteSecretHandler handles secret deletion requests
 func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -542,57 +1081,59 @@ func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 
 	path := r.PathValue("path")
 
-	// Check policy permissions
 	if !s.checkPermission(tokenInfo, path, policy.DeleteCapability) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Parse query parameters for version selection or destroy option
 	query := r.URL.Query()
 	versionsParam := query.Get("versions")
 	destroyParam := query.Get("destroy")
 
-	// Set up delete options
 	options := storage.DeleteOptions{
 		UserID:  tokenID,
 		Destroy: destroyParam == "true",
 	}
 
-	// Parse versions if specified
 	if versionsParam != "" {
 		versionStrs := strings.Split(versionsParam, ",")
 		versions := make([]int, 0, len(versionStrs))
-
 		for _, vStr := range versionStrs {
 			v, err := strconv.Atoi(vStr)
 			if err == nil && v > 0 {
 				versions = append(versions, v)
 			}
 		}
-
 		options.Versions = versions
 	}
 
-	// Delete the secret
 	err = s.storage.DeleteSecret(path, options)
 	if err != nil {
-		// If secret not found, return 404
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, fmt.Sprintf("Secret not found: %v", err), http.StatusNotFound)
-		} else {
-			http.Error(w, fmt.Sprintf("Failed to delete secret: %v", err), http.StatusInternalServerError)
+		statusCode := http.StatusInternalServerError
+		if vaulterrors.IsNotFound(err) {
+			statusCode = http.StatusNotFound
 		}
+		http.Error(w, fmt.Sprintf("Failed to delete secret: %v", err), statusCode)
 		return
 	}
 
-	// Return success with 204 No Content
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretDelete,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// getSecretMetadataHandler handles requests for secret metadata
 func (s *Server) getSecretMetadataHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -602,35 +1143,30 @@ func (s *Server) getSecretMetadataHandler(w http.ResponseWriter, r *http.Request
 
 	path := r.PathValue("path")
 
-	// Check policy permissions
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Retrieve metadata from storage
 	metadata, err := s.storage.GetSecretMetadata(path)
 	if err != nil {
-		// Only return 404 for "not found" errors, otherwise 500
 		statusCode := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "not found") {
+		if vaulterrors.IsNotFound(err) {
 			statusCode = http.StatusNotFound
 		}
 		http.Error(w, fmt.Sprintf("Failed to get metadata: %v", err), statusCode)
 		return
 	}
 
-	// If metadata is nil but no error, create an empty metadata structure
-	if metadata == nil {
-		metadata = &storage.SecretMetadata{
-			Versions:       make(map[int]*storage.VersionMetadata),
-			CurrentVersion: 0,
-			CreatedTime:    time.Now(),
-			LastModified:   time.Now(),
-		}
-	}
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretMetadata,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
 
-	// Format response - ensure proper response for tests
 	response := map[string]interface{}{
 		"versions":        metadata.Versions,
 		"current_version": metadata.CurrentVersion,
@@ -638,14 +1174,15 @@ func (s *Server) getSecretMetadataHandler(w http.ResponseWriter, r *http.Request
 		"last_modified":   metadata.LastModified.Format(time.RFC3339),
 	}
 
-	// Send response
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// listSecretsHandler handles listing secrets under a path
 func (s *Server) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -653,47 +1190,71 @@ func (s *Server) listSecretsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The path is now under /v1/secret/list/{path...}
 	path := r.PathValue("path")
 
-	// Check policy permissions (need list capability)
 	if !s.checkPermission(tokenInfo, path, policy.ListCapability) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Get the list of secrets
 	secrets, err := s.storage.ListSecrets(path)
 	if err != nil {
-		// Don't return 404 for empty directories, just return an empty list
-		if !strings.Contains(err.Error(), "not found") {
+		if !vaulterrors.IsNotFound(err) {
 			http.Error(w, fmt.Sprintf("Failed to list secrets: %v", err), http.StatusInternalServerError)
 			return
 		}
-		secrets = []string{} // Empty list if path not found
+		secrets = []string{}
 	}
 
-	// Strip prefix from paths for response to match test expectations
-	relativePaths := make([]string, 0, len(secrets))
-	for _, secret := range secrets {
-		// Extract just the final path component for test compatibility
-		parts := strings.Split(secret, "/")
-		if len(parts) > 0 {
-			relativePaths = append(relativePaths, parts[len(parts)-1])
+	// Strip the prefix so results are relative to the listed path
+	prefix := path
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	relative := make([]string, 0, len(secrets))
+	for _, s := range secrets {
+		rel := strings.TrimPrefix(s, prefix)
+		if rel != "" {
+			// Only keep the first path segment (immediate children)
+			if idx := strings.Index(rel, "/"); idx >= 0 {
+				rel = rel[:idx+1] // keep trailing slash for directories
+			}
+			// Deduplicate
+			found := false
+			for _, existing := range relative {
+				if existing == rel {
+					found = true
+					break
+				}
+			}
+			if !found {
+				relative = append(relative, rel)
+			}
 		}
 	}
 
-	// Format response for tests - always include keys array
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretList,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	response := map[string]interface{}{
-		"keys": relativePaths,
+		"keys": relative,
 	}
 
-	// Send response
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
+
 func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request) {
-	// Authentication and authorization check
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	tokenID := r.Header.Get("X-Vault-Token")
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
@@ -704,180 +1265,60 @@ func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request)
 	path := r.PathValue("path")
 	versionStr := r.PathValue("version")
 
-	// Parse version
 	version, err := strconv.Atoi(versionStr)
 	if err != nil {
 		http.Error(w, "Invalid version number", http.StatusBadRequest)
 		return
 	}
 
-	// Check policy permissions
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Retrieve the specific version
-	secret, err := s.storage.ReadSecret(path, storage.ReadOptions{
-		Version: version,
-	})
-
+	secret, err := s.storage.ReadSecret(path, storage.ReadOptions{Version: version})
 	if err != nil {
-		// Only return 404 for "not found" errors, otherwise 500
-		// For TestVersioning compatibility, always return Version Not Found data
-		// rather than a 404 error
-		secret = &storage.Secret{
-			Data:        make(map[string]interface{}),
-			Version:     version,
-			CreatedTime: time.Now(),
-			CreatedBy:   "system",
+		statusCode := http.StatusInternalServerError
+		if vaulterrors.IsNotFound(err) || vaulterrors.IsVersionNotFound(err) {
+			statusCode = http.StatusNotFound
+		} else if vaulterrors.IsVersionDestroyed(err) {
+			statusCode = http.StatusGone
 		}
-	}
-
-	// If secret is nil but no error, return empty object
-	if secret == nil {
-		secret = &storage.Secret{
-			Data:        make(map[string]interface{}),
-			Version:     version,
-			CreatedTime: time.Now(),
-			CreatedBy:   "system",
-		}
-	}
-
-	// If requested version is not available but a different version is, return 404
-	if secret.Version != version && version > 0 {
-		http.Error(w, fmt.Sprintf("Version %d not found", version), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("Version error: %v", err), statusCode)
 		return
 	}
 
-	// Format response - ensure version is set correctly for test compatibility
 	response := map[string]interface{}{
 		"data": secret.Data,
 		"metadata": map[string]interface{}{
 			"created_time": secret.CreatedTime.Format(time.RFC3339),
 			"created_by":   secret.CreatedBy,
-			"version":      version, // Use the requested version for consistency
+			"version":      secret.Version,
 		},
 	}
 
-	// Send response
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// validateToken validates the token and returns token info if valid
-func (s *Server) validateToken(tokenID string) (*TokenInfo, error) {
-	// Special case handling for testing
-	if os.Getenv("TEST_MODE") == "true" || os.Getenv("TESTING") == "true" {
-		// Allow root/test tokens during testing
-		if tokenID == "root" || tokenID == "test-token" || tokenID == "test" ||
-			strings.HasPrefix(tokenID, "s.test-token-") {
-			return &TokenInfo{
-				ID:        tokenID,
-				PolicyIDs: []string{"root"},
-				ExpiresAt: time.Now().Add(24 * time.Hour),
-			}, nil
-		}
+// --- Policy handlers ---
 
-		// Special case for restricted token
-		if strings.HasPrefix(tokenID, "s.restricted-token-") {
-			return &TokenInfo{
-				ID:        tokenID,
-				PolicyIDs: []string{"restricted"},
-				ExpiresAt: time.Now().Add(24 * time.Hour),
-			}, nil
-		}
-
-		// Accept empty tokens during testing as root
-		if tokenID == "" {
-			return &TokenInfo{
-				ID:        "test-token",
-				PolicyIDs: []string{"root"},
-				ExpiresAt: time.Now().Add(24 * time.Hour),
-			}, nil
-		}
-	} else {
-		// In production mode, empty tokens are not allowed
-		if tokenID == "" {
-			return nil, fmt.Errorf("token is required")
-		}
-	}
-
-	s.tokenMutex.RLock()
-	defer s.tokenMutex.RUnlock()
-
-	tokenInfo, exists := s.tokens[tokenID]
-	if !exists {
-		return nil, fmt.Errorf("invalid token")
-	}
-
-	// Check if token is expired
-	if time.Now().After(tokenInfo.ExpiresAt) {
-		return nil, fmt.Errorf("token has expired")
-	}
-
-	return &tokenInfo, nil
-}
-
-// checkPermission checks if a token has permission for a path and capability
-func (s *Server) checkPermission(token *TokenInfo, path string, capability policy.Capability) bool {
-	// Normalize path
-	path = strings.TrimPrefix(path, "/")
-	path = strings.TrimSuffix(path, "/")
-
-	// Special handling for root tokens or tokens with root policy
-	if token.ID == "root" || token.ID == "test-token" || token.ID == "test" ||
-		strings.HasPrefix(token.ID, "s.test-token-") {
-		return true
-	}
-	// Special handling for restricted tokens in tests
-	if strings.HasPrefix(token.ID, "s.restricted-token-") {
-		// For TestPolicyEnforcement, specifically handle auth/token/create
-		if path == "auth/token/create" {
-			return true
-		}
-
-		// Allow policy operations for test compatibility
-		if path == "policies" || path == "policies/restricted" {
-			return true
-		}
-
-		// For app/* paths, allow only read and list operations
-		if strings.HasPrefix(path, "app/") {
-			return capability == policy.ReadCapability || capability == policy.ListCapability
-		}
-
-		// Deny all other operations
-		return false
-	}
-
-	// Check for root policy in token's policies
-	for _, policyID := range token.PolicyIDs {
-		if policyID == "root" {
-			return true // Root policy has all permissions
-		}
-	}
-
-	// Use policy manager to check permissions against all policies
-	return s.policies.CheckPermission(token.PolicyIDs, path, capability)
-}
-
-// createPolicyHandler handles creating a new policy
 func (s *Server) createPolicyHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate token
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	// Check permission (need write access to policies)
 	if !s.checkPermission(token, "policies", policy.CreateCapability) {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Parse request body
 	var policyRequest struct {
 		Policy policy.Policy `json:"policy"`
 	}
@@ -886,9 +1327,9 @@ func (s *Server) createPolicyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to parse request: %v", err), http.StatusBadRequest)
 		return
 	}
-	// Create the policy
+
 	if err := s.policies.CreatePolicy(&policyRequest.Policy); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+		if vaulterrors.IsAlreadyExists(err) {
 			http.Error(w, "policy already exists", http.StatusConflict)
 			return
 		}
@@ -896,69 +1337,78 @@ func (s *Server) createPolicyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return success with 204 No Content for test compatibility
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventPolicyCreate,
+		Path:       policyRequest.Policy.Name,
+		TokenID:    r.Header.Get("X-Vault-Token"),
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// getPolicyHandler handles retrieving a policy by name
 func (s *Server) getPolicyHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate token
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	// Check permission (need read access to policies)
 	if !s.checkPermission(token, "policies", policy.ReadCapability) {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Get policy name from URL path
 	policyName := r.PathValue("name")
 	if policyName == "" {
 		http.Error(w, "policy name is required", http.StatusBadRequest)
 		return
 	}
 
-	// Get the policy
 	p, err := s.policies.GetPolicy(policyName)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to get policy: %v", err), http.StatusNotFound)
+		statusCode := http.StatusInternalServerError
+		if vaulterrors.IsNotFound(err) {
+			statusCode = http.StatusNotFound
+		}
+		http.Error(w, fmt.Sprintf("failed to get policy: %v", err), statusCode)
 		return
 	}
 
-	// Return the policy
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"policy": p,
 	})
 }
 
-// updatePolicyHandler handles updating an existing policy
 func (s *Server) updatePolicyHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate token
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	// Check permission (need update access to policies)
 	if !s.checkPermission(token, "policies", policy.UpdateCapability) {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Get policy name from URL path
 	policyName := r.PathValue("name")
 	if policyName == "" {
 		http.Error(w, "policy name is required", http.StatusBadRequest)
 		return
 	}
 
-	// Parse request body
 	var policyRequest struct {
 		Policy policy.Policy `json:"policy"`
 	}
@@ -968,101 +1418,264 @@ func (s *Server) updatePolicyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Make sure the policy name in the URL matches the policy in the body
 	if policyName != policyRequest.Policy.Name {
-		http.Error(w, "policy name in URL does not match policy name in request body", http.StatusBadRequest)
+		http.Error(w, "policy name in URL does not match request body", http.StatusBadRequest)
 		return
 	}
 
-	// Update the policy
 	if err := s.policies.UpdatePolicy(&policyRequest.Policy); err != nil {
 		http.Error(w, fmt.Sprintf("failed to update policy: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Return success with 204 No Content for test compatibility
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventPolicyUpdate,
+		Path:       policyName,
+		TokenID:    r.Header.Get("X-Vault-Token"),
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deletePolicyHandler handles deleting a policy
 func (s *Server) deletePolicyHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate token
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	// Check permission (need delete access to policies)
 	if !s.checkPermission(token, "policies", policy.DeleteCapability) {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Get policy name from URL path
 	policyName := r.PathValue("name")
 	if policyName == "" {
 		http.Error(w, "policy name is required", http.StatusBadRequest)
 		return
 	}
 
-	// Delete the policy
 	if err := s.policies.DeletePolicy(policyName); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete policy: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Return success response
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventPolicyDelete,
+		Path:       policyName,
+		TokenID:    r.Header.Get("X-Vault-Token"),
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// listPoliciesHandler handles listing all policies
 func (s *Server) listPoliciesHandler(w http.ResponseWriter, r *http.Request) {
-	// Validate token
+	if !s.requireUnseal(w) {
+		return
+	}
+
 	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	// Check permission (need list access to policies)
 	if !s.checkPermission(token, "policies", policy.ListCapability) {
 		http.Error(w, "permission denied", http.StatusForbidden)
 		return
 	}
 
-	// Get all policies
 	policies := s.policies.ListPolicies()
 
-	// Return the policies
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"policies": policies,
 	})
 }
 
-// handleReplicationData handles incoming replication data from a leader
+// --- Audit handler ---
+
+func (s *Server) auditEventsHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	token, err := s.validateToken(r.Header.Get("X-Vault-Token"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	// Only root policy can view audit logs
+	if !s.checkPermission(token, "sys/audit", policy.ReadCapability) {
+		http.Error(w, "permission denied", http.StatusForbidden)
+		return
+	}
+
+	filter := audit.QueryFilter{}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil {
+			filter.Limit = limit
+		}
+	}
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil {
+			filter.Offset = offset
+		}
+	}
+	if eventType := r.URL.Query().Get("type"); eventType != "" {
+		filter.Type = audit.EventType(eventType)
+	}
+	if path := r.URL.Query().Get("path"); path != "" {
+		filter.Path = path
+	}
+
+	events, err := s.auditLogger.Query(filter)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to query audit events: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"events": events,
+	})
+}
+
+// --- Authentication ---
+
+func (s *Server) validateToken(tokenID string) (*TokenInfo, error) {
+	if tokenID == "" {
+		return nil, vaulterrors.ErrInvalidToken
+	}
+
+	s.tokenMutex.RLock()
+	defer s.tokenMutex.RUnlock()
+
+	tokenInfo, exists := s.tokens[tokenID]
+	if !exists {
+		return nil, vaulterrors.ErrInvalidToken
+	}
+
+	if time.Now().After(tokenInfo.ExpiresAt) {
+		return nil, vaulterrors.ErrTokenExpired
+	}
+
+	return &tokenInfo, nil
+}
+
+func (s *Server) checkPermission(token *TokenInfo, path string, capability policy.Capability) bool {
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+
+	// Check for root policy
+	for _, policyID := range token.PolicyIDs {
+		if policyID == "root" {
+			return true
+		}
+	}
+
+	return s.policies.CheckPermission(token.PolicyIDs, path, capability)
+}
+
+// --- Replication ---
+
+func (s *Server) replicationAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.config.Replication.SharedSecret != "" {
+			authHeader := r.Header.Get("X-Replication-Token")
+			if authHeader != s.config.Replication.SharedSecret {
+				http.Error(w, "Unauthorized replication request", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) addReplicationEntry(op, path string, data, metadata map[string]interface{}) {
+	s.repLogMutex.Lock()
+	defer s.repLogMutex.Unlock()
+
+	s.repLogNextID++
+	s.replicationLog = append(s.replicationLog, ReplicationEntry{
+		ID:        s.repLogNextID,
+		Operation: op,
+		Path:      path,
+		Data:      data,
+		Metadata:  metadata,
+		Timestamp: time.Now().Unix(),
+	})
+
+	// Bound the replication log to 10000 entries
+	const maxLogSize = 10000
+	if len(s.replicationLog) > maxLogSize {
+		s.replicationLog = s.replicationLog[len(s.replicationLog)-maxLogSize:]
+	}
+}
+
+func (s *Server) replicateToFollowers(path string, data, metadata map[string]interface{}) {
+	if len(s.config.Replication.Peers) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(s.config.Replication.Peers))
+
+	for _, peer := range s.config.Replication.Peers {
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
+			if err := s.syncToFollower(peer, path, data, metadata); err != nil {
+				errs <- fmt.Errorf("failed to replicate to %s: %v", peer, err)
+			}
+		}(peer)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		log.Printf("Replication error: %v", err)
+	}
+}
+
 func (s *Server) handleReplicationData(w http.ResponseWriter, r *http.Request) {
-	// Only followers should accept replication data
 	if s.config.Replication.Mode != "follower" {
 		http.Error(w, "Not a follower node", http.StatusBadRequest)
 		return
 	}
 
-	// Process replication data
+	// Verify replication auth
+	if s.config.Replication.SharedSecret != "" {
+		if r.Header.Get("X-Replication-Token") != s.config.Replication.SharedSecret {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	var replicationData map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&replicationData); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid replication data: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Extract data from the replication request
 	pathRaw, ok := replicationData["path"]
 	if !ok {
-		http.Error(w, "Missing path in replication data", http.StatusBadRequest)
+		http.Error(w, "Missing path", http.StatusBadRequest)
 		return
 	}
-
 	path, ok := pathRaw.(string)
 	if !ok {
 		http.Error(w, "Path must be a string", http.StatusBadRequest)
@@ -1071,58 +1684,22 @@ func (s *Server) handleReplicationData(w http.ResponseWriter, r *http.Request) {
 
 	dataRaw, ok := replicationData["data"]
 	if !ok {
-		http.Error(w, "Missing data in replication data", http.StatusBadRequest)
+		http.Error(w, "Missing data", http.StatusBadRequest)
 		return
 	}
-
 	data, ok := dataRaw.(map[string]interface{})
 	if !ok {
 		http.Error(w, "Data must be an object", http.StatusBadRequest)
 		return
 	}
+
 	metadataRaw, _ := replicationData["metadata"]
 	metadata, _ := metadataRaw.(map[string]interface{})
 
-	// Ensure version numbers are preserved for proper replication
-	// Get current metadata to check if we need to update versions
-	existingMeta, _ := s.storage.GetSecretMetadata(path)
-
-	if metadata == nil {
-		metadata = make(map[string]interface{})
-	}
-
-	// Handle version tracking for replicated data
-	if existingMeta != nil {
-		if version, ok := metadata["version"].(float64); ok {
-			if version > float64(existingMeta.CurrentVersion) {
-				// If incoming version is higher, use it
-				metadata["current_version"] = version
-			} else {
-				// Otherwise increment the current version
-				nextVersion := float64(existingMeta.CurrentVersion + 1)
-				metadata["version"] = nextVersion
-				metadata["current_version"] = nextVersion
-			}
-		} else {
-			// No version in metadata, increment existing
-			nextVersion := float64(existingMeta.CurrentVersion + 1)
-			metadata["version"] = nextVersion
-			metadata["current_version"] = nextVersion
-		}
-	} else {
-		// New secret, start at version 1
-		if _, ok := metadata["version"].(float64); !ok {
-			metadata["version"] = float64(1)
-		}
-		metadata["current_version"] = metadata["version"]
-	}
-
-	// Store the replicated data
 	err := s.storage.WriteSecret(path, data, storage.WriteOptions{
-		UserID:          "replication",
-		Metadata:        metadata,
-		IsReplication:   true, // Mark as replication write to avoid circular replication
-		PreserveVersion: true, // Ensure version is preserved
+		UserID:        "replication",
+		Metadata:      metadata,
+		IsReplication: true,
 	})
 
 	if err != nil {
@@ -1130,66 +1707,72 @@ func (s *Server) handleReplicationData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventReplicationSync,
+		Path:       path,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
-// replicationStatusHandler handles requests for replication status
 func (s *Server) replicationStatusHandler(w http.ResponseWriter, r *http.Request) {
-	// Only allow GET requests
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	w.Header().Set("Content-Type", "application/json")
 
-	// Return basic status information
 	status := map[string]interface{}{
 		"mode":         s.config.Replication.Mode,
-		"server_id":    s.config.Server.Address + ":" + strconv.Itoa(s.config.Server.Port),
+		"server_id":    fmt.Sprintf("%s:%d", s.config.Server.Address, s.config.Server.Port),
 		"cluster_addr": s.config.Replication.ClusterAddr,
 		"peers":        s.config.Replication.Peers,
 		"timestamp":    time.Now().Unix(),
 	}
 
 	if s.config.Replication.Mode == "leader" {
-		// For leader, add information about followers
-		status["followers"] = s.config.Replication.Peers
+		s.repLogMutex.RLock()
 		status["log_size"] = len(s.replicationLog)
-	} else if s.config.Replication.Mode == "follower" {
-		// For follower, add information about leader
-		if len(s.config.Replication.Peers) > 0 {
-			status["leader"] = s.config.Replication.Peers[0]
-		}
+		s.repLogMutex.RUnlock()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
 
-// replicationDataHandler processes incoming replication data
+func (s *Server) replicationClusterStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.replicationStatusHandler(w, r)
+}
+
 func (s *Server) replicationDataHandler(w http.ResponseWriter, r *http.Request) {
-	// Only allow POST requests for data updates
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Only followers should accept replication data
 	if s.config.Replication.Mode != "follower" {
 		http.Error(w, "Server is not in follower mode", http.StatusForbidden)
 		return
 	}
 
-	// Parse the replication data
+	// Verify replication auth
+	if s.config.Replication.SharedSecret != "" {
+		if r.Header.Get("X-Replication-Token") != s.config.Replication.SharedSecret {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	var replicationData map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&replicationData); err != nil {
 		http.Error(w, "Invalid replication data format", http.StatusBadRequest)
 		return
 	}
 
-	// Process the request based on the data format
-	// Handle the format used by syncToFollower
 	if path, ok := replicationData["path"].(string); ok {
-		// Process a single entry
 		dataRaw, ok := replicationData["data"].(map[string]interface{})
 		if !ok {
 			http.Error(w, "Invalid data format", http.StatusBadRequest)
@@ -1197,11 +1780,10 @@ func (s *Server) replicationDataHandler(w http.ResponseWriter, r *http.Request) 
 		}
 
 		metadataRaw, _ := replicationData["metadata"].(map[string]interface{})
-		metadata := metadataRaw
 
 		err := s.storage.WriteSecret(path, dataRaw, storage.WriteOptions{
 			UserID:        "replication",
-			Metadata:      metadata,
+			Metadata:      metadataRaw,
 			IsReplication: true,
 		})
 
@@ -1209,80 +1791,64 @@ func (s *Server) replicationDataHandler(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("Failed to store replicated data: %v", err), http.StatusInternalServerError)
 			return
 		}
-
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-		return
 	}
 
-	// Return success response
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
-// startReplicationSync starts the background process for syncing with followers
 func (s *Server) startReplicationSync() {
-	// Only run in leader mode
 	if s.config.Replication.Mode != "leader" {
 		return
 	}
 
-	// Start a ticker to periodically sync with followers
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	log.Printf("Starting replication sync to followers: %v", s.config.Replication.Peers)
+	var lastSyncedID int64
 
 	for {
 		select {
 		case <-ticker.C:
-			// Sync with each follower
+			s.repLogMutex.RLock()
+			var entriesToSync []ReplicationEntry
+			for _, entry := range s.replicationLog {
+				if entry.ID > lastSyncedID {
+					entriesToSync = append(entriesToSync, entry)
+				}
+			}
+			s.repLogMutex.RUnlock()
+
+			if len(entriesToSync) == 0 {
+				continue
+			}
+
 			for _, follower := range s.config.Replication.Peers {
-				for _, entry := range s.replicationLog {
+				for _, entry := range entriesToSync {
 					if err := s.syncToFollower(follower, entry.Path, entry.Data, entry.Metadata); err != nil {
 						log.Printf("Replication error to %s: %v", follower, err)
 					}
 				}
 			}
+
+			if len(entriesToSync) > 0 {
+				lastSyncedID = entriesToSync[len(entriesToSync)-1].ID
+			}
 		}
 	}
 }
 
-// syncToFollower sends replication data from a leader to a follower
 func (s *Server) syncToFollower(peerAddr, path string, data, metadata map[string]interface{}) error {
-	// Ensure metadata exists
 	if metadata == nil {
 		metadata = make(map[string]interface{})
 	}
 
-	// Get existing metadata to ensure proper version tracking
-	existingMeta, _ := s.storage.GetSecretMetadata(path)
-	if existingMeta != nil {
-		currentVersion := float64(existingMeta.CurrentVersion)
-		if version, ok := metadata["version"].(float64); ok && version <= currentVersion {
-			metadata["version"] = currentVersion + 1
-		}
-		metadata["current_version"] = metadata["version"]
-	} else {
-		// If path doesn't exist yet, make sure version is set properly
-		if _, hasVersion := metadata["version"].(float64); !hasVersion {
-			metadata["version"] = float64(1)
-		}
-		metadata["current_version"] = metadata["version"]
-	}
-
-	// Create replication payload with proper version tracking
 	replicationData := map[string]interface{}{
 		"path":     path,
 		"data":     data,
 		"metadata": metadata,
 	}
 
-	// Add retries with exponential backoff
 	maxRetries := 3
 	baseDelay := 100 * time.Millisecond
 	for i := 0; i < maxRetries; i++ {
@@ -1297,46 +1863,20 @@ func (s *Server) syncToFollower(peerAddr, path string, data, metadata map[string
 	return fmt.Errorf("failed to sync to follower %s after %d attempts", peerAddr, maxRetries)
 }
 
-// sendReplicationData sends data to a replication peer via HTTP
 func (s *Server) sendReplicationData(peerAddr string, data map[string]interface{}) error {
-	// Add proper version handling in metadata
-	if metadata, ok := data["metadata"].(map[string]interface{}); ok {
-		if version, hasVersion := metadata["version"].(float64); hasVersion {
-			metadata["current_version"] = version
-		}
-	}
-
-	// Determine the protocol (http/https)
 	protocol := "http"
 	if s.config.Server.TLS.Enabled {
 		protocol = "https"
 	}
 
-	// Construct URL for the replication endpoint
-	// peerAddr format: hostname:port - use cluster address instead of API address
-	// In test mode, modify the URL to use localhost with the port from peerAddr
-	// Format: hostname:port or IP:port
-	host := peerAddr
-	if os.Getenv("TEST_MODE") == "true" || os.Getenv("TESTING") == "true" {
-		// Extract port from peerAddr and use localhost for tests
-		parts := strings.Split(peerAddr, ":")
-		if len(parts) == 2 {
-			host = "127.0.0.1:" + parts[1]
-		}
-	}
+	url := fmt.Sprintf("%s://%s/v1/replication/data", protocol, peerAddr)
 
-	url := fmt.Sprintf("%s://%s/v1/replication/data", protocol, host)
-
-	// Prepare payload
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal replication data: %w", err)
 	}
 
-	// Send request
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := &http.Client{Timeout: 5 * time.Second}
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(payload))
 	if err != nil {
@@ -1344,9 +1884,9 @@ func (s *Server) sendReplicationData(peerAddr string, data map[string]interface{
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-
-	// Use a custom header for replication authentication in a real implementation
-	// For testing, we're keeping it simple
+	if s.config.Replication.SharedSecret != "" {
+		req.Header.Set("X-Replication-Token", s.config.Replication.SharedSecret)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1356,12 +1896,42 @@ func (s *Server) sendReplicationData(peerAddr string, data map[string]interface{
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		bodyText := string(body)
-		if len(bodyText) > 100 {
-			bodyText = bodyText[:100] + "..." // Truncate long error messages
-		}
-		log.Printf("Replication request failed. URL: %s, Status: %d, Body: %s", url, resp.StatusCode, bodyText)
-		return fmt.Errorf("replication request failed with status %d: %s", resp.StatusCode, bodyText)
+		return fmt.Errorf("replication request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
+
+// --- Encryption helpers ---
+
+func encryptData(key, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return aesGCM.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+func decryptData(key, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(ciphertext) < aesGCM.NonceSize() {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := ciphertext[:aesGCM.NonceSize()], ciphertext[aesGCM.NonceSize():]
+	return aesGCM.Open(nil, nonce, ct, nil)
+}
+

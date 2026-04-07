@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-leader
+  namespace: securevault
+  labels:
+    app: securevault
+    role: leader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: securevault
+      role: leader
+  template:
+    metadata:
+      labels:
+        app: securevault
+        role: leader
+    spec:
+      containers:
+        - name: vault
+          image: securevault:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8200
+              name: api
+            - containerPort: 8201
+              name: cluster
+          volumeMounts:
+            - name: config
+              mountPath: /vault/config
+            - name: data
+              mountPath: /vault/data
+            - name: audit
+              mountPath: /vault/audit
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: config
+          configMap:
+            name: vault-leader-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: vault-leader-data
+        - name: audit
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-leader
+  namespace: securevault
+  labels:
+    app: securevault
+    role: leader
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8200
+      targetPort: 8200
+      name: api
+    - port: 8201
+      targetPort: 8201
+      name: cluster
+  selector:
+    app: securevault
+    role: leader
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vault-leader-data
+  namespace: securevault
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-leader-config
+  namespace: securevault
+data:
+  config.yaml: |
+    server:
+      address: "0.0.0.0"
+      port: 8200
+      tls:
+        enabled: false
+    storage:
+      type: "file"
+      path: "/vault/data"
+    auth:
+      token_ttl: "8h"
+    seal:
+      secret_shares: 3
+      secret_threshold: 2
+    rate_limit:
+      enabled: true
+      requests_per_sec: 100
+      burst: 200
+    audit:
+      enabled: true
+      path: "/vault/audit/audit.log"
+    replication:
+      mode: "leader"
+      cluster_addr: "vault-leader.securevault.svc.cluster.local:8201"
+      peers:
+        - "vault-follower-0.vault-follower.securevault.svc.cluster.local:8201"
+        - "vault-follower-1.vault-follower.securevault.svc.cluster.local:8201"
+      shared_secret: "change-me-to-a-k8s-secret-ref"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-follower-config
+  namespace: securevault
+data:
+  config.yaml: |
+    server:
+      address: "0.0.0.0"
+      port: 8200
+      tls:
+        enabled: false
+    storage:
+      type: "file"
+      path: "/vault/data"
+    auth:
+      token_ttl: "8h"
+    seal:
+      secret_shares: 3
+      secret_threshold: 2
+    rate_limit:
+      enabled: true
+      requests_per_sec: 100
+      burst: 200
+    audit:
+      enabled: true
+      path: "/vault/audit/audit.log"
+    replication:
+      mode: "follower"
+      cluster_addr: "$(POD_NAME).vault-follower.securevault.svc.cluster.local:8201"
+      peers:
+        - "vault-leader.securevault.svc.cluster.local:8201"
+      shared_secret: "change-me-to-a-k8s-secret-ref"

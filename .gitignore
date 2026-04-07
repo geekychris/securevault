@@ -1,0 +1,53 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+vendor/
+coverage.out
+
+# Java build artifacts
+clients/java/target/
+examples/walkthrough/java/target/
+examples/java/target/
+
+# Rust build artifacts
+clients/rust/target/
+examples/rust/target/
+
+# Data directories (contains secrets/keys — never commit)
+data/
+*.enc
+*.key
+
+# Vault runtime files
+root_keys_dont_checkin.json
+/tmp/securevault*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/

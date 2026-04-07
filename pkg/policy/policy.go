@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	vaulterrors "securevault/pkg/errors"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,16 +17,11 @@ import (
 type Capability string
 
 const (
-	// CreateCapability allows creating new secrets
 	CreateCapability Capability = "create"
-	// ReadCapability allows reading secrets
-	ReadCapability Capability = "read"
-	// UpdateCapability allows updating existing secrets
+	ReadCapability   Capability = "read"
 	UpdateCapability Capability = "update"
-	// DeleteCapability allows deleting secrets
 	DeleteCapability Capability = "delete"
-	// ListCapability allows listing secrets in a path
-	ListCapability Capability = "list"
+	ListCapability   Capability = "list"
 )
 
 // IsValid checks if a capability is valid
@@ -60,7 +57,7 @@ type Manager struct {
 
 // NewManager creates a new policy manager
 func NewManager(policiesDir string) (*Manager, error) {
-	if err := os.MkdirAll(policiesDir, 0755); err != nil {
+	if err := os.MkdirAll(policiesDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create policies directory: %w", err)
 	}
 
@@ -69,7 +66,6 @@ func NewManager(policiesDir string) (*Manager, error) {
 		policies:    make(map[string]*Policy),
 	}
 
-	// Load existing policies
 	if err := manager.loadPolicies(); err != nil {
 		return nil, err
 	}
@@ -77,7 +73,6 @@ func NewManager(policiesDir string) (*Manager, error) {
 	return manager, nil
 }
 
-// loadPolicies loads all policies from the policies directory
 func (m *Manager) loadPolicies() error {
 	files, err := os.ReadDir(m.policiesDir)
 	if err != nil {
@@ -104,7 +99,6 @@ func (m *Manager) loadPolicies() error {
 	return nil
 }
 
-// loadPolicyFromFile loads a policy from a YAML file
 func (m *Manager) loadPolicyFromFile(filePath string) (*Policy, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -116,7 +110,6 @@ func (m *Manager) loadPolicyFromFile(filePath string) (*Policy, error) {
 		return nil, fmt.Errorf("failed to parse policy file: %w", err)
 	}
 
-	// Validate and compile path patterns
 	if err := m.validateAndCompilePolicy(&policy); err != nil {
 		return nil, err
 	}
@@ -124,7 +117,6 @@ func (m *Manager) loadPolicyFromFile(filePath string) (*Policy, error) {
 	return &policy, nil
 }
 
-// validateAndCompilePolicy validates a policy and compiles path patterns
 func (m *Manager) validateAndCompilePolicy(policy *Policy) error {
 	if policy.Name == "" {
 		return fmt.Errorf("policy name is required")
@@ -145,7 +137,6 @@ func (m *Manager) validateAndCompilePolicy(policy *Policy) error {
 			}
 		}
 
-		// Convert path pattern to regex
 		pattern := pathToRegexPattern(rule.Path)
 		regex, err := regexp.Compile(pattern)
 		if err != nil {
@@ -157,22 +148,19 @@ func (m *Manager) validateAndCompilePolicy(policy *Policy) error {
 	return nil
 }
 
-// pathToRegexPattern converts a policy path pattern to a regex pattern
 func pathToRegexPattern(path string) string {
-	// Special case for global wildcard
 	if path == "*" {
 		return "^.*$"
 	}
-	
-	// Escape regex special characters except * and /
+
+	// Handle ** (match any number of path segments) before * (single segment)
 	pattern := regexp.QuoteMeta(path)
-	
-	// Replace * with regex pattern for segment match
+	// \*\* was escaped from **, replace with match-everything
+	pattern = strings.Replace(pattern, "\\*\\*", ".*", -1)
+	// \* was escaped from *, replace with single-segment match
 	pattern = strings.Replace(pattern, "\\*", "[^/]+", -1)
-	
-	// Add word boundary to ensure exact match
 	pattern = "^" + pattern + "$"
-	
+
 	return pattern
 }
 
@@ -181,30 +169,25 @@ func (m *Manager) CreatePolicy(policy *Policy) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	// Validate policy
 	if err := m.validateAndCompilePolicy(policy); err != nil {
 		return err
 	}
 
-	// Check if policy already exists
 	if _, exists := m.policies[policy.Name]; exists {
-		return fmt.Errorf("policy %s already exists", policy.Name)
+		return &vaulterrors.PolicyExistsError{Name: policy.Name}
 	}
 
-	// Save policy to file
 	filePath := filepath.Join(m.policiesDir, policy.Name+".yaml")
 	data, err := yaml.Marshal(policy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal policy: %w", err)
 	}
 
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write policy file: %w", err)
 	}
 
-	// Add to in-memory cache
 	m.policies[policy.Name] = policy
-
 	return nil
 }
 
@@ -215,7 +198,7 @@ func (m *Manager) GetPolicy(name string) (*Policy, error) {
 
 	policy, exists := m.policies[name]
 	if !exists {
-		return nil, fmt.Errorf("policy %s not found", name)
+		return nil, &vaulterrors.PolicyNotFoundError{Name: name}
 	}
 
 	return policy, nil
@@ -226,30 +209,25 @@ func (m *Manager) UpdatePolicy(policy *Policy) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	// Validate policy
 	if err := m.validateAndCompilePolicy(policy); err != nil {
 		return err
 	}
 
-	// Check if policy exists
 	if _, exists := m.policies[policy.Name]; !exists {
-		return fmt.Errorf("policy %s not found", policy.Name)
+		return &vaulterrors.PolicyNotFoundError{Name: policy.Name}
 	}
 
-	// Save policy to file
 	filePath := filepath.Join(m.policiesDir, policy.Name+".yaml")
 	data, err := yaml.Marshal(policy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal policy: %w", err)
 	}
 
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write policy file: %w", err)
 	}
 
-	// Update in-memory cache
 	m.policies[policy.Name] = policy
-
 	return nil
 }
 
@@ -258,20 +236,16 @@ func (m *Manager) DeletePolicy(name string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	// Check if policy exists
 	if _, exists := m.policies[name]; !exists {
-		return fmt.Errorf("policy %s not found", name)
+		return &vaulterrors.PolicyNotFoundError{Name: name}
 	}
 
-	// Delete policy file
 	filePath := filepath.Join(m.policiesDir, name+".yaml")
 	if err := os.Remove(filePath); err != nil {
 		return fmt.Errorf("failed to delete policy file: %w", err)
 	}
 
-	// Remove from in-memory cache
 	delete(m.policies, name)
-
 	return nil
 }
 
@@ -293,30 +267,9 @@ func (m *Manager) CheckPermission(policyIDs []string, path string, capability Ca
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	// Normalize path for consistent matching
 	path = strings.TrimPrefix(path, "/")
 	path = strings.TrimSuffix(path, "/")
 
-	// First check for root policy with wildcard permissions (optimization)
-	for _, policyID := range policyIDs {
-		if policyID == "root" {
-			rootPolicy, exists := m.policies["root"]
-			if exists {
-				// Check if root policy grants this capability globally
-				for _, rule := range rootPolicy.Rules {
-					if rule.Path == "*" {
-						for _, cap := range rule.Capabilities {
-							if cap == capability {
-								return true  // Root policy with wildcard grants this capability
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Check each policy for permission
 	for _, policyID := range policyIDs {
 		policy, exists := m.policies[policyID]
 		if !exists {
@@ -324,34 +277,33 @@ func (m *Manager) CheckPermission(policyIDs []string, path string, capability Ca
 		}
 
 		if policy.CheckPathPermission(path, capability) {
-			return true  // This policy grants the capability
+			return true
 		}
 	}
 
-	return false  // No policy grants this capability
+	return false
 }
+
 // CheckPathPermission checks if the policy grants the required capability for the path
 func (p *Policy) CheckPathPermission(path string, capability Capability) bool {
-	// First check for global wildcard rules (optimization)
+	// Check for global wildcard rules
 	for _, rule := range p.Rules {
 		if rule.Path == "*" {
 			for _, cap := range rule.Capabilities {
 				if cap == capability {
-					return true  // Global wildcard matches any path
+					return true
 				}
 			}
 		}
 	}
 
-	// Special case for ListCapability - needs to match parent directories
+	// Special case for ListCapability - match parent directories
 	if capability == ListCapability {
-		// Check if we have list permission on the exact path
 		for _, rule := range p.Rules {
 			if rule.compiledPath == nil {
 				continue
 			}
 
-			// Check for exact match first
 			if rule.compiledPath.MatchString(path) {
 				for _, cap := range rule.Capabilities {
 					if cap == ListCapability {
@@ -360,7 +312,6 @@ func (p *Policy) CheckPathPermission(path string, capability Capability) bool {
 				}
 			}
 
-			// Check for parent path with wildcard
 			parentPath := path
 			for parentPath != "" {
 				if rule.Path == parentPath || rule.Path == parentPath+"/*" {
@@ -370,8 +321,7 @@ func (p *Policy) CheckPathPermission(path string, capability Capability) bool {
 						}
 					}
 				}
-				
-				// Move up to parent directory
+
 				lastSlash := strings.LastIndex(parentPath, "/")
 				if lastSlash == -1 {
 					parentPath = ""
@@ -382,15 +332,13 @@ func (p *Policy) CheckPathPermission(path string, capability Capability) bool {
 		}
 	}
 
-	// Check other path-specific rules
+	// Check path-specific rules
 	for _, rule := range p.Rules {
 		if rule.compiledPath == nil {
-			continue  // Skip rules with invalid patterns
+			continue
 		}
 
-		// Check if path matches this rule's pattern
 		if rule.compiledPath.MatchString(path) {
-			// Check if rule grants the requested capability
 			for _, cap := range rule.Capabilities {
 				if cap == capability {
 					return true
@@ -399,6 +347,5 @@ func (p *Policy) CheckPathPermission(path string, capability Capability) bool {
 		}
 	}
 
-	return false  // No rule grants this capability for this path
+	return false
 }
-
