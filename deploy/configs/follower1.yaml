@@ -25,6 +25,9 @@ audit:
 replication:
   mode: "follower"
   cluster_addr: "172.28.0.11:8201"
+  leader_api_addr: "http://172.28.0.10:8200"
   peers:
     - "172.28.0.10:8201"
   shared_secret: "cluster-replication-secret-change-in-production"
+  health_check_sec: 5
+  failover_timeout_sec: 30

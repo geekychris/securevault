@@ -48,11 +48,17 @@ replication:
   # "standalone", "leader", or "follower"
   mode: "standalone"
   cluster_addr: "10.0.1.4:8201"
+  # Public API address of the leader — followers forward writes here
+  leader_api_addr: "http://10.0.1.4:8200"
   peers:
     - "10.0.1.5:8201"
     - "10.0.1.6:8201"
   # Shared secret for authenticating replication traffic between nodes
   shared_secret: "change-me-to-a-strong-random-value"
+  # How often followers health-check the leader (seconds)
+  health_check_sec: 5
+  # How long leader must be unreachable before a follower promotes itself (seconds)
+  failover_timeout_sec: 30
 
 ## Logging Configuration
 logging:

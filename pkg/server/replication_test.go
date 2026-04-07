@@ -153,6 +153,15 @@ func TestThreeNodeReplication(t *testing.T) {
 	initAndUnseal(t, follower1)
 	initAndUnseal(t, follower2)
 
+	// Set correct leader API address on followers so health monitor works
+	leaderAPIAddr := fmt.Sprintf("http://127.0.0.1:%d", leader.apiPort)
+	follower1.server.clusterMu.Lock()
+	follower1.server.leaderAddr = leaderAPIAddr
+	follower1.server.clusterMu.Unlock()
+	follower2.server.clusterMu.Lock()
+	follower2.server.leaderAddr = leaderAPIAddr
+	follower2.server.clusterMu.Unlock()
+
 	// Give replication servers time to start
 	time.Sleep(1 * time.Second)
 

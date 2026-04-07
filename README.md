@@ -322,37 +322,119 @@ kubectl apply -f deploy/k8s/leader.yaml
 kubectl apply -f deploy/k8s/followers.yaml
 ```
 
-## Replication
+## Replication, Write Routing & Failover
+
+### How it works
+
+- **Writes** can be sent to **any node**. Followers automatically forward writes to the leader.
+- **Reads** are served locally from any node (leader or follower).
+- **Replication** happens from leader to all followers after each write.
+- **Failover**: if the leader goes down, a follower automatically promotes itself to leader.
 
 ```mermaid
 sequenceDiagram
     participant Client
+    participant Follower
     participant Leader
-    participant Follower1
     participant Follower2
 
-    Client->>Leader: POST /v1/secret/app/key
-    Leader->>Leader: Encrypt & store
-    Leader->>Follower1: Replicate (authenticated)
-    Leader->>Follower2: Replicate (authenticated)
-    Follower1-->>Leader: ACK
-    Follower2-->>Leader: ACK
-    Leader-->>Client: 204 No Content
+    Note over Client,Follower: Client can write to any node
+    Client->>Follower: POST /v1/secret/app/key
+    Note over Follower: I'm a follower → forward
+    Follower->>Leader: POST /v1/secret/app/key (forwarded)
+    Leader->>Leader: Auth + Encrypt + Store
+    Leader-->>Follower: 204 No Content
+    Leader->>Follower: Replicate data
+    Leader->>Follower2: Replicate data
+    Follower-->>Client: 204 + X-Vault-Forward: true
 
-    Client->>Follower1: GET /v1/secret/app/key
-    Follower1-->>Client: {"data": {...}}
+    Note over Client,Follower2: Reads are always local
+    Client->>Follower2: GET /v1/secret/app/key
+    Follower2-->>Client: {"data": {...}}
 ```
 
-Configure in `config.yaml`:
+### Failover
 
+```mermaid
+sequenceDiagram
+    participant Follower
+    participant Leader
+
+    loop Every health_check_sec
+        Follower->>Leader: GET /v1/health
+        Leader-->>Follower: 200 OK
+    end
+
+    Note over Leader: Leader crashes
+    Follower->>Leader: GET /v1/health
+    Leader--xFollower: Connection refused
+
+    Note over Follower: Down for > failover_timeout_sec
+
+    Follower->>Follower: Promote to leader
+    Note over Follower: Now accepts writes directly
+```
+
+### Configuration
+
+**Leader node** (`leader-config.yaml`):
 ```yaml
 replication:
-  mode: "leader"          # or "follower"
-  cluster_addr: "10.0.1.10:8201"
-  peers:
+  mode: "leader"
+  cluster_addr: "10.0.1.10:8201"      # Address for replication traffic
+  leader_api_addr: "http://10.0.1.10:8200"  # Public API address (for forwarding)
+  peers:                                # Follower cluster addresses
     - "10.0.1.11:8201"
     - "10.0.1.12:8201"
-  shared_secret: "change-me"   # authenticates replication traffic
+  shared_secret: "your-secret-here"    # Authenticates replication traffic
+  health_check_sec: 5                  # How often followers check leader (default: 5)
+  failover_timeout_sec: 30             # Seconds before failover (default: 30)
+```
+
+**Follower node** (`follower-config.yaml`):
+```yaml
+replication:
+  mode: "follower"
+  cluster_addr: "10.0.1.11:8201"
+  leader_api_addr: "http://10.0.1.10:8200"  # Where to forward writes
+  peers:
+    - "10.0.1.10:8201"                # Leader's cluster address
+  shared_secret: "your-secret-here"    # Must match leader
+  health_check_sec: 5
+  failover_timeout_sec: 30
+```
+
+### Key configuration fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `mode` | Yes | `"leader"`, `"follower"`, or `"standalone"` |
+| `cluster_addr` | Yes (cluster) | This node's address for replication traffic (port 8201) |
+| `leader_api_addr` | Recommended | Leader's public API address (e.g., `http://10.0.1.10:8200`). Followers use this to forward writes. |
+| `peers` | Yes (cluster) | Leader: list of follower cluster addrs. Follower: list with leader's cluster addr. |
+| `shared_secret` | Yes (cluster) | Shared secret for authenticating replication traffic. Must be the same on all nodes. |
+| `health_check_sec` | No | How often followers health-check the leader (default: 5) |
+| `failover_timeout_sec` | No | How long leader must be down before a follower promotes itself (default: 30) |
+
+### Load balancer integration
+
+The health endpoint reports each node's role:
+
+```bash
+curl http://any-node:8200/v1/health
+# → {"status": "ok", "role": "leader", "leader_addr": "http://10.0.1.10:8200", ...}
+# → {"status": "ok", "role": "follower", "leader_addr": "http://10.0.1.10:8200", ...}
+```
+
+You can use this to configure a load balancer to route writes to the leader and reads to any node. But it's not strictly necessary — followers forward writes transparently.
+
+### Running a 3-node cluster with Docker
+
+```bash
+docker compose -f docker-compose.cluster.yml up --build
+# Leader: http://localhost:8200
+# Follower 1: http://localhost:8210
+# Follower 2: http://localhost:8220
 ```
 
 ## Testing
@@ -361,13 +443,13 @@ replication:
 # Unit tests (all packages)
 go test ./pkg/... -count=1
 
-# Including 3-node replication test
-go test ./pkg/server/ -run TestThreeNodeReplication -v
+# 3-node replication, write forwarding, and failover tests
+go test ./pkg/server/ -run "TestThreeNode|TestWriteForwarding|TestFailover" -v
 
 # Build and run all examples (REST, Go, Python, Java)
 bash examples/run-all-examples.sh
 
-# Docker 3-node cluster test
+# Docker 3-node cluster test (30 assertions: replication + forwarding + failover)
 bash deploy/test-cluster.sh
 ```
 
