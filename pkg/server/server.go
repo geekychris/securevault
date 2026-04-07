@@ -54,10 +54,13 @@ type Config struct {
 	} `yaml:"auth"`
 
 	Replication struct {
-		Mode          string   `yaml:"mode"`
-		ClusterAddr   string   `yaml:"cluster_addr"`
-		Peers         []string `yaml:"peers"`
-		SharedSecret  string   `yaml:"shared_secret"`
+		Mode              string   `yaml:"mode"`
+		ClusterAddr       string   `yaml:"cluster_addr"`
+		Peers             []string `yaml:"peers"`
+		SharedSecret      string   `yaml:"shared_secret"`
+		LeaderAPIAddr     string   `yaml:"leader_api_addr"`      // Public API address of the leader (for forwarding)
+		HealthCheckSec    int      `yaml:"health_check_sec"`     // How often followers check leader health (default: 5)
+		FailoverTimeoutSec int     `yaml:"failover_timeout_sec"` // How long leader must be down before failover (default: 30)
 	} `yaml:"replication"`
 
 	Seal struct {
@@ -111,6 +114,13 @@ type Server struct {
 	replicationReady   chan struct{}
 	rateLimiter        *RateLimiter
 	tokenStorePath     string
+
+	// Leader election and failover
+	clusterMu      sync.RWMutex
+	activeRole     string // "leader", "follower", or "standalone"
+	leaderAddr     string // current known leader API address (e.g., "http://10.0.1.10:8200")
+	leaderAlive    bool
+	failoverCancel context.CancelFunc
 }
 
 // TokenInfo represents information about an authentication token
@@ -345,6 +355,34 @@ func NewServer(config *Config) (*Server, error) {
 		}
 	}
 
+	// Initialize cluster role
+	switch config.Replication.Mode {
+	case "leader":
+		server.activeRole = "leader"
+		if config.Replication.LeaderAPIAddr == "" {
+			server.leaderAddr = fmt.Sprintf("http://%s:%d", config.Server.Address, config.Server.Port)
+		} else {
+			server.leaderAddr = config.Replication.LeaderAPIAddr
+		}
+		server.leaderAlive = true
+	case "follower":
+		server.activeRole = "follower"
+		// Derive leader API address from first peer's cluster addr
+		if config.Replication.LeaderAPIAddr != "" {
+			server.leaderAddr = config.Replication.LeaderAPIAddr
+		} else if len(config.Replication.Peers) > 0 {
+			// Best-effort: assume leader API is on port 8200 at the same host
+			parts := strings.Split(config.Replication.Peers[0], ":")
+			if len(parts) >= 1 {
+				server.leaderAddr = fmt.Sprintf("http://%s:8200", parts[0])
+			}
+		}
+		server.leaderAlive = true
+	default:
+		server.activeRole = "standalone"
+		server.leaderAlive = true
+	}
+
 	// Load persisted tokens if vault is unsealed
 	if !sealMgr.IsSealed() {
 		server.loadTokens()
@@ -432,6 +470,13 @@ func (s *Server) Start() error {
 		if s.config.Replication.Mode == "leader" && len(s.config.Replication.Peers) > 0 {
 			go s.startReplicationSync()
 		}
+
+		// Start leader health monitor on followers for failover
+		if s.config.Replication.Mode == "follower" {
+			ctx, cancel := context.WithCancel(context.Background())
+			s.failoverCancel = cancel
+			go s.startLeaderHealthMonitor(ctx)
+		}
 	}
 
 	// Start main HTTP server
@@ -461,6 +506,11 @@ func (s *Server) SealManager() *seal.Manager {
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
 	var errs []error
+
+	// Stop failover monitor
+	if s.failoverCancel != nil {
+		s.failoverCancel()
+	}
 
 	// Persist tokens before shutdown
 	s.persistTokens()
@@ -575,6 +625,8 @@ func (s *Server) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 		"status":      status,
 		"initialized": s.sealManager.IsInitialized(),
 		"sealed":      s.sealManager.IsSealed(),
+		"role":        s.getRole(),
+		"leader_addr": s.getLeaderAddr(),
 	})
 }
 
@@ -721,6 +773,9 @@ func (s *Server) systemStatusHandler(w http.ResponseWriter, r *http.Request) {
 // --- Token handlers ---
 
 func (s *Server) createTokenHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardToLeader(w, r) {
+		return
+	}
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -916,6 +971,11 @@ func (s *Server) revokeTokenHandler(w http.ResponseWriter, r *http.Request) {
 // --- Secret handlers ---
 
 func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
+	// Forward writes to leader BEFORE auth check — leader has the tokens
+	if s.forwardToLeader(w, r) {
+		return
+	}
+
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -1068,6 +1128,9 @@ func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardToLeader(w, r) {
+		return
+	}
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -1304,6 +1367,9 @@ func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request)
 // --- Policy handlers ---
 
 func (s *Server) createPolicyHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardToLeader(w, r) {
+		return
+	}
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -1388,6 +1454,9 @@ func (s *Server) getPolicyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updatePolicyHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardToLeader(w, r) {
+		return
+	}
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -1441,6 +1510,9 @@ func (s *Server) updatePolicyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePolicyHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardToLeader(w, r) {
+		return
+	}
 	if !s.requireUnseal(w) {
 		return
 	}
@@ -1587,6 +1659,177 @@ func (s *Server) checkPermission(token *TokenInfo, path string, capability polic
 	}
 
 	return s.policies.CheckPermission(token.PolicyIDs, path, capability)
+}
+
+// --- Write Forwarding & Failover ---
+
+// isLeader returns true if this node is the active leader
+func (s *Server) isLeader() bool {
+	s.clusterMu.RLock()
+	defer s.clusterMu.RUnlock()
+	return s.activeRole == "leader" || s.activeRole == "standalone"
+}
+
+// getLeaderAddr returns the current leader's API address
+func (s *Server) getLeaderAddr() string {
+	s.clusterMu.RLock()
+	defer s.clusterMu.RUnlock()
+	return s.leaderAddr
+}
+
+// getRole returns the current role
+func (s *Server) getRole() string {
+	s.clusterMu.RLock()
+	defer s.clusterMu.RUnlock()
+	return s.activeRole
+}
+
+// forwardToLeader forwards a write request to the leader node.
+// Returns true if the request was forwarded (caller should not process it).
+// Returns false if this node IS the leader (caller should process normally).
+func (s *Server) forwardToLeader(w http.ResponseWriter, r *http.Request) bool {
+	if s.isLeader() {
+		return false // we are the leader, handle locally
+	}
+
+	leaderAddr := s.getLeaderAddr()
+	if leaderAddr == "" {
+		http.Error(w, "No leader available — cluster may be in failover", http.StatusServiceUnavailable)
+		return true
+	}
+
+	// Build the forwarded URL
+	targetURL := leaderAddr + r.URL.RequestURI()
+
+	// Read the original body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		return true
+	}
+
+	// Create forwarded request
+	fwdReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		http.Error(w, "Failed to create forwarded request", http.StatusInternalServerError)
+		return true
+	}
+
+	// Copy headers
+	for key, values := range r.Header {
+		for _, v := range values {
+			fwdReq.Header.Add(key, v)
+		}
+	}
+	fwdReq.Header.Set("X-Forwarded-By", s.config.Replication.ClusterAddr)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(fwdReq)
+	if err != nil {
+		log.Printf("Failed to forward write to leader %s: %v", leaderAddr, err)
+		http.Error(w, "Leader unavailable — write could not be forwarded", http.StatusBadGateway)
+		return true
+	}
+	defer resp.Body.Close()
+
+	// Copy the leader's response back to the client
+	for key, values := range resp.Header {
+		for _, v := range values {
+			w.Header().Add(key, v)
+		}
+	}
+	w.Header().Set("X-Vault-Forward", "true")
+	w.Header().Set("X-Vault-Leader", leaderAddr)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+	return true
+}
+
+// startLeaderHealthMonitor runs on followers, periodically checking if the leader is alive.
+// If the leader is down for longer than FailoverTimeoutSec, the first follower promotes itself.
+func (s *Server) startLeaderHealthMonitor(ctx context.Context) {
+	if s.activeRole != "follower" {
+		return
+	}
+
+	checkInterval := time.Duration(s.config.Replication.HealthCheckSec) * time.Second
+	if checkInterval <= 0 {
+		checkInterval = 5 * time.Second
+	}
+	failoverTimeout := time.Duration(s.config.Replication.FailoverTimeoutSec) * time.Second
+	if failoverTimeout <= 0 {
+		failoverTimeout = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	var downSince time.Time
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			leaderAddr := s.getLeaderAddr()
+			if leaderAddr == "" {
+				continue
+			}
+
+			healthURL := leaderAddr + "/v1/health"
+			resp, err := client.Get(healthURL)
+			if err != nil || resp.StatusCode == 0 {
+				// Leader is unreachable
+				if downSince.IsZero() {
+					downSince = time.Now()
+					log.Printf("Leader %s is unreachable, starting failover timer (%v)", leaderAddr, failoverTimeout)
+				}
+
+				if time.Since(downSince) >= failoverTimeout {
+					log.Printf("Leader %s has been down for %v — promoting to leader", leaderAddr, time.Since(downSince))
+					s.promoteToLeader()
+					return // stop monitoring, we are now the leader
+				}
+			} else {
+				resp.Body.Close()
+				if !downSince.IsZero() {
+					log.Printf("Leader %s is back online, cancelling failover", leaderAddr)
+					downSince = time.Time{} // reset
+				}
+				s.clusterMu.Lock()
+				s.leaderAlive = true
+				s.clusterMu.Unlock()
+			}
+		}
+	}
+}
+
+// promoteToLeader promotes this follower to leader
+func (s *Server) promoteToLeader() {
+	s.clusterMu.Lock()
+	defer s.clusterMu.Unlock()
+
+	s.activeRole = "leader"
+	s.leaderAddr = fmt.Sprintf("http://%s:%d", s.config.Server.Address, s.config.Server.Port)
+	s.leaderAlive = true
+
+	log.Printf("*** This node has been PROMOTED to leader (addr: %s) ***", s.leaderAddr)
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp: time.Now(),
+		Type:      audit.EventType("sys.failover"),
+		Success:   true,
+		Metadata: map[string]interface{}{
+			"new_role":    "leader",
+			"new_address": s.leaderAddr,
+		},
+	})
+
+	// Start replicating to remaining peers
+	if len(s.config.Replication.Peers) > 0 {
+		go s.startReplicationSync()
+	}
 }
 
 // --- Replication ---

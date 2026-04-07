@@ -68,6 +68,9 @@ func startNode(t *testing.T, mode string, clusterPort int, peers []string, share
 	config.Replication.ClusterAddr = fmt.Sprintf("127.0.0.1:%d", clusterPort)
 	config.Replication.Peers = peers
 	config.Replication.SharedSecret = sharedSecret
+	config.Replication.LeaderAPIAddr = "" // will be set per-test if needed
+	config.Replication.HealthCheckSec = 2
+	config.Replication.FailoverTimeoutSec = 6
 
 	srv, err := NewServer(config)
 	require.NoError(t, err)
@@ -297,4 +300,163 @@ func TestReplicationAuth(t *testing.T) {
 	// Should be rejected
 	assert.True(t, rr.Code == http.StatusUnauthorized || rr.Code == http.StatusBadRequest,
 		"Replication without auth should be rejected, got %d", rr.Code)
+}
+
+// TestWriteForwarding verifies that writes to a follower are forwarded to the leader
+func TestWriteForwarding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping forwarding test in short mode")
+	}
+
+	sharedSecret := "fwd-test-secret"
+	leaderClusterPort := getFreePort()
+	followerClusterPort := getFreePort()
+
+	followerAddr := fmt.Sprintf("127.0.0.1:%d", followerClusterPort)
+	leaderClusterAddr := fmt.Sprintf("127.0.0.1:%d", leaderClusterPort)
+
+	// Start leader
+	leader := startNode(t, "leader", leaderClusterPort, []string{followerAddr}, sharedSecret)
+	defer os.RemoveAll(leader.tmpDir)
+	defer leader.server.httpServer.Close()
+	leaderToken := initAndUnseal(t, leader)
+
+	// Set the leader's API address on the follower config
+	leaderAPIAddr := fmt.Sprintf("http://127.0.0.1:%d", leader.apiPort)
+
+	// Start follower — manually set LeaderAPIAddr
+	follower := startNode(t, "follower", followerClusterPort, []string{leaderClusterAddr}, sharedSecret)
+	defer os.RemoveAll(follower.tmpDir)
+	defer follower.server.httpServer.Close()
+	followerToken := initAndUnseal(t, follower)
+
+	// Set leader address on follower so forwarding works
+	follower.server.clusterMu.Lock()
+	follower.server.leaderAddr = leaderAPIAddr
+	follower.server.clusterMu.Unlock()
+
+	time.Sleep(1 * time.Second)
+
+	// ── Test 1: Write to follower should be forwarded to leader ──
+	t.Run("WriteToFollowerForwardedToLeader", func(t *testing.T) {
+		// Write via follower, using the LEADER's token (since it's forwarded to leader for auth)
+		rr := follower.doRequest("POST", "/v1/secret/forwarded/secret1", leaderToken, map[string]interface{}{
+			"data": map[string]interface{}{"origin": "written-via-follower"},
+		})
+		// Should succeed (forwarded to leader)
+		assert.True(t, rr.Code == http.StatusNoContent || rr.Code == http.StatusOK,
+			"Write to follower should be forwarded, got %d: %s", rr.Code, rr.Body.String())
+
+		// Verify it's on the leader
+		rr = leader.doRequest("GET", "/v1/secret/forwarded/secret1", leaderToken, nil)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp map[string]interface{}
+		json.Unmarshal(rr.Body.Bytes(), &resp)
+		assert.Equal(t, "written-via-follower", resp["data"].(map[string]interface{})["origin"])
+	})
+
+	// ── Test 2: Response includes forwarding headers ──
+	t.Run("ForwardingHeadersPresent", func(t *testing.T) {
+		rr := follower.doRequest("POST", "/v1/secret/forwarded/secret2", leaderToken, map[string]interface{}{
+			"data": map[string]interface{}{"test": "headers"},
+		})
+		assert.Equal(t, "true", rr.Header().Get("X-Vault-Forward"))
+		assert.Contains(t, rr.Header().Get("X-Vault-Leader"), fmt.Sprintf("%d", leader.apiPort))
+	})
+
+	// ── Test 3: Leader writes directly (no forwarding) ──
+	t.Run("LeaderWritesDirect", func(t *testing.T) {
+		rr := leader.doRequest("POST", "/v1/secret/direct/secret1", leaderToken, map[string]interface{}{
+			"data": map[string]interface{}{"origin": "direct-to-leader"},
+		})
+		assert.Equal(t, http.StatusNoContent, rr.Code)
+		assert.Empty(t, rr.Header().Get("X-Vault-Forward"), "Direct write should not have forwarding header")
+	})
+
+	// ── Test 4: Reads from follower work locally (no forwarding) ──
+	t.Run("ReadsAreLocal", func(t *testing.T) {
+		// Write something to leader that replicates
+		leader.doRequest("POST", "/v1/secret/local-read/test", leaderToken, map[string]interface{}{
+			"data": map[string]interface{}{"local": "read"},
+		})
+
+		// Wait for replication
+		time.Sleep(7 * time.Second)
+
+		rr := follower.doRequest("GET", "/v1/secret/local-read/test", followerToken, nil)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Empty(t, rr.Header().Get("X-Vault-Forward"), "Reads should not be forwarded")
+	})
+
+	// ── Test 5: Health reports role and leader ──
+	t.Run("HealthReportsRole", func(t *testing.T) {
+		rr := leader.doRequest("GET", "/v1/health", "", nil)
+		var health map[string]interface{}
+		json.Unmarshal(rr.Body.Bytes(), &health)
+		assert.Equal(t, "leader", health["role"])
+
+		rr = follower.doRequest("GET", "/v1/health", "", nil)
+		json.Unmarshal(rr.Body.Bytes(), &health)
+		assert.Equal(t, "follower", health["role"])
+		assert.Equal(t, leaderAPIAddr, health["leader_addr"])
+	})
+}
+
+// TestFailover verifies that a follower promotes itself when the leader goes down
+func TestFailover(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping failover test in short mode")
+	}
+
+	sharedSecret := "failover-test"
+	leaderClusterPort := getFreePort()
+	followerClusterPort := getFreePort()
+
+	leaderClusterAddr := fmt.Sprintf("127.0.0.1:%d", leaderClusterPort)
+
+	// Start leader
+	leader := startNode(t, "leader", leaderClusterPort,
+		[]string{fmt.Sprintf("127.0.0.1:%d", followerClusterPort)}, sharedSecret)
+	defer os.RemoveAll(leader.tmpDir)
+	leaderToken := initAndUnseal(t, leader)
+
+	leaderAPIAddr := fmt.Sprintf("http://127.0.0.1:%d", leader.apiPort)
+
+	// Start follower with short failover timeout
+	follower := startNode(t, "follower", followerClusterPort, []string{leaderClusterAddr}, sharedSecret)
+	defer os.RemoveAll(follower.tmpDir)
+	defer follower.server.httpServer.Close()
+	initAndUnseal(t, follower)
+
+	follower.server.clusterMu.Lock()
+	follower.server.leaderAddr = leaderAPIAddr
+	follower.server.clusterMu.Unlock()
+
+	time.Sleep(1 * time.Second)
+
+	// Verify follower is a follower
+	assert.Equal(t, "follower", follower.server.getRole())
+
+	// Write to leader works
+	rr := leader.doRequest("POST", "/v1/secret/failover/test", leaderToken, map[string]interface{}{
+		"data": map[string]interface{}{"before": "failover"},
+	})
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Kill the leader
+	t.Log("Killing leader...")
+	leader.server.httpServer.Close()
+	if leader.server.replicationServer != nil {
+		leader.server.replicationServer.Close()
+	}
+
+	// Wait for failover (health check interval 2s, timeout 6s)
+	t.Log("Waiting for failover...")
+	time.Sleep(10 * time.Second)
+
+	// Follower should have promoted itself
+	role := follower.server.getRole()
+	assert.Equal(t, "leader", role, "Follower should have promoted to leader after failover")
+
+	t.Logf("Follower role after failover: %s", role)
 }
