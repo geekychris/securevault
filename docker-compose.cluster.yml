@@ -1,5 +1,5 @@
 ##
-## SecureVault 3-Node Cluster with Replication
+## Vaultrix 3-Node Cluster with Replication
 ##
 ## Usage:
 ##   docker compose -f docker-compose.cluster.yml up --build

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# SecureVault Client Access Script
+# Vaultrix Client Access Script
 #
 # This script demonstrates what an application does:
 #   1. Authenticate with a restricted token
@@ -27,7 +27,7 @@ fi
 source "$TOKEN_FILE"
 
 echo "============================================"
-echo "  SecureVault Client Access Demo"
+echo "  Vaultrix Client Access Demo"
 echo "============================================"
 echo ""
 

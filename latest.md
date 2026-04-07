@@ -1,10 +1,10 @@
-# SecureVault Server and Client Guide
+# Vaultrix Server and Client Guide
 
-This guide provides instructions for building and running the SecureVault server in test mode and using the Go client to interact with it.
+This guide provides instructions for building and running the Vaultrix server in test mode and using the Go client to interact with it.
 
 ## Overview
 
-SecureVault is a secure storage system for sensitive data like secrets, credentials, and keys. It provides:
+Vaultrix is a secure storage system for sensitive data like secrets, credentials, and keys. It provides:
 
 - Secure storage with encryption at rest
 - Fine-grained access control
@@ -127,7 +127,7 @@ curl -X POST http://localhost:8200/v1/auth/token/create \
 
 ## Available Client Libraries
 
-SecureVault provides client libraries for multiple programming languages:
+Vaultrix provides client libraries for multiple programming languages:
 
 - **Go**: Full-featured client with all operations supported
 - **Java**: Complete client with object-oriented API
@@ -158,7 +158,7 @@ The project includes a test client that verifies server functionality.
 
 ### Writing Your Own Client
 
-You can use the SecureVault Go client in your applications:
+You can use the Vaultrix Go client in your applications:
 
 ```go
 import (
@@ -185,7 +185,7 @@ func main() {
 
 ### Using the Java Client
 
-The Java client provides an object-oriented interface to the SecureVault server:
+The Java client provides an object-oriented interface to the Vaultrix server:
 
 ```java
 import com.example.securevault.SecureVaultClient;
@@ -282,7 +282,7 @@ For more advanced configuration options, see the comments in `config.yaml`. Opti
 
 ## Production Deployment Guide
 
-When moving to production, never use test mode. Instead, follow these steps to securely deploy and manage your SecureVault server.
+When moving to production, never use test mode. Instead, follow these steps to securely deploy and manage your Vaultrix server.
 
 ### Production Server Configuration
 
@@ -328,7 +328,7 @@ When moving to production, never use test mode. Instead, follow these steps to s
 
 ### Initial Server Initialization
 
-On first startup, you need to initialize the SecureVault server:
+On first startup, you need to initialize the Vaultrix server:
 
 1. **Generate the root token and unseal keys**:
    ```bash

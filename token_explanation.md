@@ -1,6 +1,6 @@
-# SecureVault: Token Management and Server Setup Guide
+# Vaultrix: Token Management and Server Setup Guide
 
-This document provides comprehensive guidance on setting up a SecureVault server, managing tokens, and implementing user authentication best practices.
+This document provides comprehensive guidance on setting up a Vaultrix server, managing tokens, and implementing user authentication best practices.
 
 ## 1. Initial Server Setup and Requirements
 
@@ -16,7 +16,7 @@ This document provides comprehensive guidance on setting up a SecureVault server
 
 ### Configuration File Structure
 
-SecureVault uses a YAML configuration file (`config.yaml`) for server settings:
+Vaultrix uses a YAML configuration file (`config.yaml`) for server settings:
 
 ```yaml
 server:
@@ -74,7 +74,7 @@ Recommended production directory layout:
 
 ## 2. Certificate and Key Generation
 
-SecureVault requires TLS for secure communication. Here's how to generate the necessary certificates:
+Vaultrix requires TLS for secure communication. Here's how to generate the necessary certificates:
 
 ### Self-Signed Certificates (Development Only)
 
@@ -110,11 +110,11 @@ For production, use certificates signed by a trusted Certificate Authority (CA) 
 
 ## 3. Root Token Creation Process
 
-The root token is a privileged credential with full administrative access to the SecureVault server.
+The root token is a privileged credential with full administrative access to the Vaultrix server.
 
 ### Automatic Root Token Creation (TEST_MODE)
 
-When SecureVault is started with `test_mode: true` in the configuration:
+When Vaultrix is started with `test_mode: true` in the configuration:
 
 - A root token with ID `s.root` is automatically generated
 - This token is assigned the "root" policy with all capabilities
@@ -122,7 +122,7 @@ When SecureVault is started with `test_mode: true` in the configuration:
 - The root token is written to the server logs
 
 ```log
-INFO  [2025-05-02 08:18:51] SecureVault server initialized in TEST_MODE
+INFO  [2025-05-02 08:18:51] Vaultrix server initialized in TEST_MODE
 INFO  [2025-05-02 08:18:51] Root token created: s.root
 INFO  [2025-05-02 08:18:51] Root token expiration: 2025-05-03 08:18:51 UTC
 ```
@@ -170,7 +170,7 @@ The root token is automatically assigned the "root" policy, which grants all cap
 
 ## 4. User Management and Authentication
 
-SecureVault uses a token-based authentication system with policy-based access control.
+Vaultrix uses a token-based authentication system with policy-based access control.
 
 ### Token Types
 
@@ -278,7 +278,7 @@ X-Vault-Token: [admin-token]
 
 ### Managing Credentials
 
-SecureVault stores credentials (usernames, passwords, API keys, etc.) as encrypted secrets:
+Vaultrix stores credentials (usernames, passwords, API keys, etc.) as encrypted secrets:
 
 ```java
 // Storing credentials
@@ -378,7 +378,7 @@ String password = (String) secret.getData().get("password");
 
 ## Summary
 
-SecureVault provides a robust system for managing secrets and authentication using a token-based approach. By following the setup and configuration guidelines in this document, you can establish a secure environment for storing and accessing sensitive credentials and other secrets.
+Vaultrix provides a robust system for managing secrets and authentication using a token-based approach. By following the setup and configuration guidelines in this document, you can establish a secure environment for storing and accessing sensitive credentials and other secrets.
 
 Remember that security is a continuous process - regularly review configurations, rotate credentials, and apply updates to maintain a strong security posture.
 

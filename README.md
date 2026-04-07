@@ -1,6 +1,8 @@
-# SecureVault - Secure Secrets Management System
+![Vaultrix](assets/vaultrix-logo.png)
 
-SecureVault is a secure secrets management system similar to HashiCorp Vault, designed to safely store, access, and distribute sensitive information like API keys, passwords, certificates, and other secrets.
+# Vaultrix - Secure Secrets Management System
+
+Vaultrix is a secure secrets management system similar to HashiCorp Vault, designed to safely store, access, and distribute sensitive information like API keys, passwords, certificates, and other secrets.
 
 ## Table of Contents
 
@@ -382,7 +384,7 @@ if err != nil {
 
 ## Permission Scenarios Examples
 
-SecureVault uses a path-based permission system with capabilities that determine what actions users can perform on specific paths. Here are some common scenarios:
+Vaultrix uses a path-based permission system with capabilities that determine what actions users can perform on specific paths. Here are some common scenarios:
 
 ### Read-Only Access to Specific Path
 
@@ -460,7 +462,7 @@ rules:
 
 ## Secret Versioning
 
-SecureVault supports versioning of secrets, allowing you to track changes over time and roll back to previous versions if needed.
+Vaultrix supports versioning of secrets, allowing you to track changes over time and roll back to previous versions if needed.
 
 ### Working with Versions in the Go Client
 
@@ -766,7 +768,7 @@ client.delete_secret("api/keys", DeleteOptions(destroy=True))
 
 ## Replication Setup
 
-SecureVault supports a leader-follower replication model for high availability and improved read performance. In this model:
+Vaultrix supports a leader-follower replication model for high availability and improved read performance. In this model:
 
 - The **leader** node accepts write operations and replicates changes to followers
 - **Follower** nodes serve read operations and receive updates from the leader
@@ -876,7 +878,7 @@ curl -H "X-Vault-Token: $TOKEN" http://leader-ip:8200/v1/sys/replication/status
 
 ### Replication Consistency
 
-SecureVault provides two consistency modes:
+Vaultrix provides two consistency modes:
 
 1. **Strong consistency**: Ensures changes are replicated to all followers before confirming writes
 2. **Eventual consistency**: Faster performance, but followers may temporarily serve stale data
@@ -909,7 +911,7 @@ Use strong cipher suites and TLS 1.2+ for secure communication.
 
 ### Network Security
 
-- Place SecureVault servers in a private network segment
+- Place Vaultrix servers in a private network segment
 - Use firewalls to restrict access to the API endpoints
 - Configure a load balancer with WAF protection for public-facing endpoints
 - Consider using a VPN for administrative access
@@ -956,7 +958,7 @@ rules:
 
 ### Backup Types
 
-SecureVault supports two types of backups:
+Vaultrix supports two types of backups:
 
 1. **Snapshot backups**: Complete point-in-time backup of all secrets and configuration
 2. **Incremental backups**: Backup of changes since the last snapshot
@@ -1058,14 +1060,14 @@ In addition to the snapshot functionality, you should also back up the underlyin
 4. Try restarting the follower node
 ## Architecture
 
-SecureVault's architecture consists of several core components working together to provide secure secret management:
+Vaultrix's architecture consists of several core components working together to provide secure secret management:
 
 ### System Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                                                                 │
-│                     SecureVault System                          │
+│                     Vaultrix System                             │
 │                                                                 │
 │  ┌───────────┐     ┌──────────────────────────────────────┐    │
 │  │           │     │            Server (Go)               │    │
@@ -1125,7 +1127,7 @@ SecureVault's architecture consists of several core components working together 
 * **Audit Logging**: Detailed logging of all operations for compliance
 ## Contributing
 
-Contributions to SecureVault are welcome! This section outlines the process for contributing to the project and guidelines to follow.
+Contributions to Vaultrix are welcome! This section outlines the process for contributing to the project and guidelines to follow.
 
 ### Development Prerequisites
 
@@ -1236,7 +1238,7 @@ Fixes #123
 
 ### Licensing
 
-By contributing to SecureVault, you agree that your contributions will be licensed under the project's MIT License.
+By contributing to Vaultrix, you agree that your contributions will be licensed under the project's MIT License.
 
 ## License
 

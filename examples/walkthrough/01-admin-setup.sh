@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# SecureVault Admin Setup Script
+# Vaultrix Admin Setup Script
 #
 # This script demonstrates what an administrator does:
 #   1. Start the vault server
@@ -24,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOKEN_FILE="/tmp/securevault-walkthrough-tokens.env"
 
 echo "============================================"
-echo "  SecureVault Admin Setup"
+echo "  Vaultrix Admin Setup"
 echo "============================================"
 echo ""
 

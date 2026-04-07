@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Test 3-node SecureVault cluster with Docker Compose
+# Test 3-node Vaultrix cluster with Docker Compose
 #
 # This script:
 #   1. Builds the Docker image
@@ -69,7 +69,7 @@ wait_for_health() {
 # ═══════════════════════════════════════════════════════════════════
 bold "═══════════════════════════════════════════════════════"
 echo ""
-bold "  SecureVault 3-Node Cluster Test (Docker)"
+bold "  Vaultrix 3-Node Cluster Test (Docker)"
 echo ""
 bold "═══════════════════════════════════════════════════════"
 echo ""

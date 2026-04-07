@@ -2,7 +2,7 @@
 name = "securevault-client"
 version = "0.1.0"
 edition = "2021"
-description = "Rust client library for the SecureVault REST API"
+description = "Rust client library for the Vaultrix REST API"
 license = "MIT"
 
 [dependencies]

@@ -3,7 +3,7 @@ package com.example.securevault.walkthrough;
 import java.util.Map;
 
 /**
- * SecureVault End-to-End Walkthrough — Cross-Team Secret Sharing
+ * Vaultrix End-to-End Walkthrough — Cross-Team Secret Sharing
  *
  * This demonstrates:
  *   1. Admin stores service-specific AND shared secrets
@@ -31,7 +31,7 @@ public class Walkthrough {
         }
 
         System.out.println("============================================");
-        System.out.println("  SecureVault Java Walkthrough");
+        System.out.println("  Vaultrix Java Walkthrough");
         System.out.println("  Cross-Team Secret Sharing");
         System.out.println("============================================");
         System.out.println();

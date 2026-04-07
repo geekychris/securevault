@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Client is the SecureVault client that provides methods for interacting with the server
+// Client is the Vaultrix client that provides methods for interacting with the server
 type Client struct {
 	config     *Config
 	httpClient *http.Client
@@ -23,9 +23,9 @@ type Client struct {
 	mu         sync.RWMutex
 }
 
-// Config contains the configuration for the SecureVault client
+// Config contains the configuration for the Vaultrix client
 type Config struct {
-	// Address is the URL of the SecureVault server
+	// Address is the URL of the Vaultrix server
 	Address string
 
 	// Token is the authentication token to use
@@ -44,7 +44,7 @@ type Config struct {
 	InsecureSkipVerify bool
 }
 
-// Secret represents a secret stored in SecureVault
+// Secret represents a secret stored in Vaultrix
 type Secret struct {
 	// Data contains the secret data
 	Data map[string]interface{}
@@ -98,7 +98,7 @@ type VersionMetadata struct {
 	CustomMetadata map[string]interface{} `json:"custom_metadata,omitempty"`
 }
 
-// Policy represents an access policy in SecureVault
+// Policy represents an access policy in Vaultrix
 type Policy struct {
 	// Name is the policy's name
 	Name string `json:"name"`
@@ -186,14 +186,14 @@ func WithInsecureSkipVerify(skip bool) ClientOption {
 	}
 }
 
-// ClientError represents an error from the SecureVault client
+// ClientError represents an error from the Vaultrix client
 type ClientError struct {
 	StatusCode int
 	Message    string
 }
 
 func (e ClientError) Error() string {
-	return fmt.Sprintf("SecureVault client error (HTTP %d): %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("Vaultrix client error (HTTP %d): %s", e.StatusCode, e.Message)
 }
 
 // IsNotFound returns true if the error is due to a resource not being found
@@ -214,7 +214,7 @@ func IsForbidden(err error) bool {
 	return errors.As(err, &clientErr) && clientErr.StatusCode == http.StatusForbidden
 }
 
-// NewClient creates a new SecureVault client with the given configuration
+// NewClient creates a new Vaultrix client with the given configuration
 func NewClient(address, token string, options ...ClientOption) (*Client, error) {
 	// Validate address
 	if address == "" {
@@ -263,7 +263,7 @@ func NewClient(address, token string, options ...ClientOption) (*Client, error) 
 	}, nil
 }
 
-// doRequest makes an HTTP request to the SecureVault server with retry logic
+// doRequest makes an HTTP request to the Vaultrix server with retry logic
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
 	// Prepare URL
 	u, err := url.Parse(c.config.Address)

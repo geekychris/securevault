@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SecureVault</title>
+<title>Vaultrix</title>
 <style>
 /* ── Reset & Base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -214,7 +214,7 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 
 <script>
 /* =========================================================================
-   SecureVault Web UI
+   Vaultrix Web UI
    ========================================================================= */
 
 const App = {
@@ -295,7 +295,7 @@ function render() {
   root.innerHTML = `
     <div class="topbar">
       <div class="topbar-left">
-        <h3>SecureVault</h3>
+        <h3>Vaultrix</h3>
         <span class="seal-badge ${App.sealStatus.sealed ? 'sealed' : 'unsealed'}">${App.sealStatus.sealed ? 'Sealed' : 'Unsealed'}</span>
       </div>
       <div class="topbar-right">
@@ -305,7 +305,7 @@ function render() {
     </div>
     <div class="layout">
       <div class="sidebar">
-        <div class="sidebar-brand"><h2>SecureVault</h2><small>Secret Management</small></div>
+        <div class="sidebar-brand"><img src="/ui/vaultrix-logo.png" alt="Vaultrix" style="max-width:160px;margin-bottom:6px;"><small>Secret Management</small></div>
         <nav class="sidebar-nav">
           ${navItem('secrets', '&#128274;', 'Secrets')}
           ${navItem('policies', '&#128220;', 'Policies')}
@@ -313,7 +313,7 @@ function render() {
           ${navItem('audit', '&#128203;', 'Audit Log')}
           ${navItem('system', '&#9881;', 'System')}
         </nav>
-        <div class="sidebar-footer">SecureVault UI v1.0</div>
+        <div class="sidebar-footer">Vaultrix v1.0</div>
       </div>
       <div class="main-content" id="content"></div>
     </div>`;
@@ -342,7 +342,7 @@ function renderPage() {
 // ── Login ────────────────────────────────────────────────────────────────
 function renderLogin() {
   return `<div class="login-page"><div class="login-card">
-    <h1>SecureVault</h1>
+    <img src="/ui/vaultrix-logo.png" alt="Vaultrix" style="max-width:220px;margin-bottom:12px;">
     <p>Enter your vault token to authenticate.</p>
     <div id="login-status" style="margin-bottom:16px;"></div>
     <div id="login-form-area">

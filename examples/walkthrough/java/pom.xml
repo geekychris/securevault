@@ -9,8 +9,8 @@
     <version>1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>SecureVault Walkthrough</name>
-    <description>End-to-end walkthrough: admin setup + client access using the Java client</description>
+    <name>Vaultrix Walkthrough</name>
+    <description>End-to-end walkthrough: admin setup + client access using the Vaultrix Java client</description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>

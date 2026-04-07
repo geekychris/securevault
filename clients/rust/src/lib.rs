@@ -1,6 +1,6 @@
 //! # securevault-client
 //!
-//! A blocking Rust client library for the SecureVault REST API.
+//! A blocking Rust client library for the Vaultrix REST API.
 //!
 //! ## Quick start
 //!

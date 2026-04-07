@@ -1,10 +1,12 @@
-# PostgreSQL Backend for SecureVault
+![Vaultrix](assets/vaultrix-logo.png)
 
-This document describes how to set up and test the PostgreSQL backend for SecureVault.
+# PostgreSQL Backend for Vaultrix
+
+This document describes how to set up and test the PostgreSQL backend for Vaultrix.
 
 ## Overview
 
-SecureVault includes a PostgreSQL backend option that provides several advantages over the file-based backend:
+Vaultrix includes a PostgreSQL backend option that provides several advantages over the file-based backend:
 
 - **Scalability**: Better performance with many secrets
 - **High availability**: Can leverage PostgreSQL's replication features
@@ -51,7 +53,7 @@ Look for the message: "database system is ready to accept connections"
 
 ### Adding PostgreSQL to Your Project
 
-If you're adding PostgreSQL support to an existing SecureVault deployment:
+If you're adding PostgreSQL support to an existing Vaultrix deployment:
 
 1. Add PostgreSQL connection details to your configuration file:
 
@@ -73,7 +75,7 @@ storage:
 psql -U securevault -d securevault -f scripts/init-postgres.sql
 ```
 
-3. Start SecureVault with PostgreSQL support:
+3. Start Vaultrix with PostgreSQL support:
 
 ```bash
 go run -tags postgres cmd/securevault/main.go
@@ -138,9 +140,9 @@ export POSTGRES_PORT=5433
 go test -tags postgres ./pkg/storage -v
 ```
 
-## Building SecureVault with PostgreSQL Support
+## Building Vaultrix with PostgreSQL Support
 
-To build SecureVault with PostgreSQL support:
+To build Vaultrix with PostgreSQL support:
 
 1. Install the PostgreSQL driver:
 
@@ -154,7 +156,7 @@ go get github.com/lib/pq
 go build -tags postgres -o securevault cmd/securevault/main.go
 ```
 
-3. Configure SecureVault to use PostgreSQL in your config.yaml:
+3. Configure Vaultrix to use PostgreSQL in your config.yaml:
 
 ```yaml
 storage:
@@ -248,7 +250,7 @@ To migrate data from file storage to PostgreSQL:
 1. Export secrets from file storage:
 
 ```bash
-# Using the SecureVault CLI
+# Using the Vaultrix CLI
 securevault export --output secrets.json
 ```
 
@@ -265,7 +267,7 @@ psql -U securevault -d securevault -f scripts/init-postgres.sql
 3. Import secrets into PostgreSQL storage:
 
 ```bash
-# Using the SecureVault CLI with PostgreSQL backend
+# Using the Vaultrix CLI with PostgreSQL backend
 securevault import --file secrets.json --storage-type postgres
 ```
 

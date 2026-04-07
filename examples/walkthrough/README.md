@@ -1,13 +1,15 @@
-# SecureVault Walkthrough: End-to-End Secret Management
+![Vaultrix](../../assets/vaultrix-logo.png)
 
-This walkthrough demonstrates the complete workflow a team would use with SecureVault, including **cross-team secret sharing**:
+# Vaultrix Walkthrough: End-to-End Secret Management
+
+This walkthrough demonstrates the complete workflow a team would use with Vaultrix, including **cross-team secret sharing**:
 
 1. An **administrator** initializes the vault, stores service-specific and shared secrets, defines composable policies, and generates multi-policy tokens
 2. **Applications and teams** use their tokens to access their own secrets AND shared secrets — while being denied access to anything outside their policies
 
 ## Prerequisites
 
-- SecureVault server built and available at `./bin/securevault`
+- Vaultrix server built and available at `./bin/securevault`
 - `curl` and `jq` installed (for the REST scripts)
 - Java 21+ and Maven 3.6+ (for the Java example)
 
@@ -15,7 +17,7 @@ This walkthrough demonstrates the complete workflow a team would use with Secure
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                        SecureVault Server                          │
+│                        Vaultrix Server                          │
 │                                                                    │
 │  ┌─────────────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 │  │      Secrets         │  │   Policies    │  │     Tokens        │  │

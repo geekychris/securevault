@@ -1,6 +1,6 @@
-# SecureVault Directory Structure
+# Vaultrix Directory Structure
 
-This document provides an overview of the SecureVault project's directory structure and explains the purpose of key components.
+This document provides an overview of the Vaultrix project's directory structure and explains the purpose of key components.
 
 ## Project Layout
 
@@ -57,11 +57,11 @@ This directory contains the main executable applications:
 
 ### Core Packages (`pkg/`)
 
-The `pkg` directory contains the core functionality of SecureVault:
+The `pkg` directory contains the core functionality of Vaultrix:
 
 #### Server Package (`pkg/server/`)
 
-- `server.go`: Implements the `Server` type, which coordinates all components of the SecureVault system. It handles HTTP endpoints, authentication, and routing requests to the appropriate handlers.
+- `server.go`: Implements the `Server` type, which coordinates all components of the Vaultrix system. It handles HTTP endpoints, authentication, and routing requests to the appropriate handlers.
 - `server_test.go`: Contains tests for the server functionality, including API endpoints, authentication, and access control.
 
 #### Policy Package (`pkg/policy/`)
@@ -82,19 +82,19 @@ The `clients` directory contains client libraries for different programming lang
 
 #### Go Client (`clients/go/`)
 
-- `client.go`: Implements the Go client library, which provides a programmatic interface to SecureVault.
+- `client.go`: Implements the Go client library, which provides a programmatic interface to Vaultrix.
 - `client_test.go`: Contains tests for the Go client implementation.
 
 #### Java Client (`clients/java/`)
 
-- `src/main/java/com/example/securevault/SecureVaultClient.java`: Main Java client class that provides methods for interacting with the SecureVault server.
+- `src/main/java/com/example/securevault/SecureVaultClient.java`: Main Java client class that provides methods for interacting with the Vaultrix server.
 - `src/main/java/com/example/securevault/config/`: Contains configuration classes for the Java client.
 - `src/main/java/com/example/securevault/exception/`: Contains custom exceptions for the Java client.
 - `src/main/java/com/example/securevault/model/`: Contains data model classes for the Java client.
 
 ### Examples (`examples/`)
 
-The `examples` directory contains example applications demonstrating the usage of SecureVault clients:
+The `examples` directory contains example applications demonstrating the usage of Vaultrix clients:
 
 - `examples/go/main.go`: Example Go application that demonstrates common operations with the Go client.
 - `examples/java/src/main/java/com/example/securevault/examples/SecureVaultExample.java`: Example Java application that demonstrates common operations with the Java client.
@@ -130,7 +130,7 @@ The `examples` directory contains example applications demonstrating the usage o
 
 ## Adding New Components
 
-When adding new components to SecureVault:
+When adding new components to Vaultrix:
 
 1. Server features should be added to the appropriate package in `pkg/`
 2. Client features should be added to the respective client library in `clients/`

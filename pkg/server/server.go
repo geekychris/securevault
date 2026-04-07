@@ -93,7 +93,7 @@ type ReplicationEntry struct {
 	Version   int                    `json:"version"`
 }
 
-// Server represents the SecureVault server
+// Server represents the Vaultrix server
 type Server struct {
 	config             *Config
 	storage            storage.Backend
@@ -188,7 +188,7 @@ func LoadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
-// NewServer creates a new SecureVault server
+// NewServer creates a new Vaultrix server
 func NewServer(config *Config) (*Server, error) {
 	// Initialize seal manager
 	sealMgr := seal.NewManager(config.Storage.Path)

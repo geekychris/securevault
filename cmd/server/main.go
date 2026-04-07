@@ -32,7 +32,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("SecureVault server started on %s:%d", config.Server.Address, config.Server.Port)
+	log.Printf("Vaultrix server started on %s:%d", config.Server.Address, config.Server.Port)
 
 	if srv.SealManager().IsInitialized() {
 		if srv.SealManager().IsSealed() {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# SecureVault — Build and Verify All Examples
+# Vaultrix — Build and Verify All Examples
 #
 # This script:
 #   1. Builds the server and all client libraries
@@ -97,7 +97,7 @@ trap cleanup EXIT
 echo ""
 bold "═══════════════════════════════════════════════════════════"
 echo ""
-bold "  SecureVault — Build & Verify All Examples"
+bold "  Vaultrix — Build & Verify All Examples"
 echo ""
 bold "═══════════════════════════════════════════════════════════"
 echo ""

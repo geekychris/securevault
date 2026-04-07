@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SecureVault Python Client Example
+Vaultrix Python Client Example
 
 Usage:
     python example.py <vault-address> [token]
