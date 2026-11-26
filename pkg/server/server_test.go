@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"securevault/pkg/audit"
 	"securevault/pkg/seal"
 
 	"github.com/stretchr/testify/assert"
@@ -462,6 +463,184 @@ func TestAuditLog(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 	events := resp["events"].([]interface{})
 	assert.Greater(t, len(events), 0)
+}
+
+// TestSecretAuditRecordShape asserts that every secret read/write/delete
+// (success, failure and permission-denied) appends exactly the expected
+// audit.Event shape -- including the denied and storage-failure paths that
+// previously logged nothing.
+func TestSecretAuditRecordShape(t *testing.T) {
+	srv, rootToken, cleanup := testServer(t)
+	defer cleanup()
+
+	// A policy with no rule covering the "secret-test/*" paths used below,
+	// so a token restricted to it is denied every capability on those paths.
+	rr := doRequest(srv, "POST", "/v1/policies", rootToken, map[string]interface{}{
+		"policy": map[string]interface{}{
+			"name":        "no-access",
+			"description": "No access to secret-test/*",
+			"rules": []map[string]interface{}{
+				{
+					"path":         "other/*",
+					"capabilities": []string{"read", "create", "update", "delete", "list"},
+				},
+			},
+		},
+	})
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	rr = doRequest(srv, "POST", "/v1/auth/token/create", rootToken, map[string]interface{}{
+		"policy_ids": []string{"no-access"},
+		"ttl":        "1h",
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+	var tokenResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &tokenResp))
+	deniedToken := tokenResp["auth"].(map[string]interface{})["client_token"].(string)
+
+	writeBody := map[string]interface{}{"data": map[string]interface{}{"k": "v"}}
+	seedSecret := func(path string) {
+		rr := doRequest(srv, "POST", "/v1/secret/"+path, rootToken, writeBody)
+		require.Equal(t, http.StatusNoContent, rr.Code)
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		eventType   audit.EventType
+		setup       func(path string)
+		method      string
+		url         string
+		body        interface{}
+		token       string
+		wantStatus  int
+		wantSuccess bool
+		wantErr     string // "" means expect empty; "-" means expect non-empty; else exact match
+	}{
+		{
+			name:        "read_success",
+			path:        "secret-test/read-ok",
+			eventType:   audit.EventSecretRead,
+			setup:       seedSecret,
+			method:      "GET",
+			url:         "/v1/secret/secret-test/read-ok",
+			token:       rootToken,
+			wantStatus:  http.StatusOK,
+			wantSuccess: true,
+			wantErr:     "",
+		},
+		{
+			name:        "read_not_found",
+			path:        "secret-test/read-missing",
+			eventType:   audit.EventSecretRead,
+			method:      "GET",
+			url:         "/v1/secret/secret-test/read-missing",
+			token:       rootToken,
+			wantStatus:  http.StatusNotFound,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+		{
+			name:        "read_denied",
+			path:        "secret-test/read-denied",
+			eventType:   audit.EventSecretRead,
+			setup:       seedSecret,
+			method:      "GET",
+			url:         "/v1/secret/secret-test/read-denied",
+			token:       deniedToken,
+			wantStatus:  http.StatusForbidden,
+			wantSuccess: false,
+			wantErr:     "permission denied",
+		},
+		{
+			name:        "write_success",
+			path:        "secret-test/write-ok",
+			eventType:   audit.EventSecretWrite,
+			method:      "POST",
+			url:         "/v1/secret/secret-test/write-ok",
+			body:        writeBody,
+			token:       rootToken,
+			wantStatus:  http.StatusNoContent,
+			wantSuccess: true,
+			wantErr:     "",
+		},
+		{
+			name:        "write_denied",
+			path:        "secret-test/write-denied",
+			eventType:   audit.EventSecretWrite,
+			method:      "POST",
+			url:         "/v1/secret/secret-test/write-denied",
+			body:        writeBody,
+			token:       deniedToken,
+			wantStatus:  http.StatusForbidden,
+			wantSuccess: false,
+			wantErr:     "permission denied",
+		},
+		{
+			name:        "delete_success",
+			path:        "secret-test/delete-ok",
+			eventType:   audit.EventSecretDelete,
+			setup:       seedSecret,
+			method:      "DELETE",
+			url:         "/v1/secret/secret-test/delete-ok?destroy=true",
+			token:       rootToken,
+			wantStatus:  http.StatusNoContent,
+			wantSuccess: true,
+			wantErr:     "",
+		},
+		{
+			name:        "delete_not_found",
+			path:        "secret-test/delete-missing",
+			eventType:   audit.EventSecretDelete,
+			method:      "DELETE",
+			url:         "/v1/secret/secret-test/delete-missing?destroy=true",
+			token:       rootToken,
+			wantStatus:  http.StatusNotFound,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+		{
+			name:        "delete_denied",
+			path:        "secret-test/delete-denied",
+			eventType:   audit.EventSecretDelete,
+			setup:       seedSecret,
+			method:      "DELETE",
+			url:         "/v1/secret/secret-test/delete-denied?destroy=true",
+			token:       deniedToken,
+			wantStatus:  http.StatusForbidden,
+			wantSuccess: false,
+			wantErr:     "permission denied",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup(tc.path)
+			}
+
+			rr := doRequest(srv, tc.method, tc.url, tc.token, tc.body)
+			assert.Equal(t, tc.wantStatus, rr.Code)
+
+			events, err := srv.auditLogger.Query(audit.QueryFilter{Type: tc.eventType, Path: tc.path})
+			require.NoError(t, err)
+			require.NotEmpty(t, events, "expected an audit event for path %s", tc.path)
+
+			got := events[len(events)-1]
+			assert.Equal(t, tc.eventType, got.Type)
+			assert.Equal(t, tc.path, got.Path)
+			assert.Equal(t, tc.wantSuccess, got.Success)
+
+			switch tc.wantErr {
+			case "":
+				assert.Empty(t, got.Error)
+			case "-":
+				assert.NotEmpty(t, got.Error)
+			default:
+				assert.Equal(t, tc.wantErr, got.Error)
+			}
+		})
+	}
 }
 
 func TestTokenExpiration(t *testing.T) {

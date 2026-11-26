@@ -54,13 +54,13 @@ type Config struct {
 	} `yaml:"auth"`
 
 	Replication struct {
-		Mode              string   `yaml:"mode"`
-		ClusterAddr       string   `yaml:"cluster_addr"`
-		Peers             []string `yaml:"peers"`
-		SharedSecret      string   `yaml:"shared_secret"`
-		LeaderAPIAddr     string   `yaml:"leader_api_addr"`      // Public API address of the leader (for forwarding)
-		HealthCheckSec    int      `yaml:"health_check_sec"`     // How often followers check leader health (default: 5)
-		FailoverTimeoutSec int     `yaml:"failover_timeout_sec"` // How long leader must be down before failover (default: 30)
+		Mode               string   `yaml:"mode"`
+		ClusterAddr        string   `yaml:"cluster_addr"`
+		Peers              []string `yaml:"peers"`
+		SharedSecret       string   `yaml:"shared_secret"`
+		LeaderAPIAddr      string   `yaml:"leader_api_addr"`      // Public API address of the leader (for forwarding)
+		HealthCheckSec     int      `yaml:"health_check_sec"`     // How often followers check leader health (default: 5)
+		FailoverTimeoutSec int      `yaml:"failover_timeout_sec"` // How long leader must be down before failover (default: 30)
 	} `yaml:"replication"`
 
 	Seal struct {
@@ -69,9 +69,9 @@ type Config struct {
 	} `yaml:"seal"`
 
 	RateLimit struct {
-		Enabled       bool    `yaml:"enabled"`
+		Enabled        bool    `yaml:"enabled"`
 		RequestsPerSec float64 `yaml:"requests_per_sec"`
-		Burst         int     `yaml:"burst"`
+		Burst          int     `yaml:"burst"`
 	} `yaml:"rate_limit"`
 
 	Audit struct {
@@ -125,8 +125,8 @@ type Server struct {
 
 // TokenInfo represents information about an authentication token
 type TokenInfo struct {
-	ID        string   `json:"id"`
-	PolicyIDs []string `json:"policy_ids"`
+	ID        string    `json:"id"`
+	PolicyIDs []string  `json:"policy_ids"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -415,7 +415,7 @@ func (s *Server) requireUnseal(w http.ResponseWriter) bool {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "vault is sealed",
+			"error":  "vault is sealed",
 			"sealed": true,
 		})
 		return false
@@ -1006,6 +1006,15 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.checkPermission(tokenInfo, path, requiredCap) {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretWrite,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      "permission denied",
+		})
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
@@ -1035,6 +1044,15 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 		Metadata: metadata,
 	})
 	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretWrite,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, fmt.Sprintf("Failed to store secret: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1072,6 +1090,15 @@ func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretRead,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      "permission denied",
+		})
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
@@ -1145,6 +1172,15 @@ func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 
 	if !s.checkPermission(tokenInfo, path, policy.DeleteCapability) {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretDelete,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      "permission denied",
+		})
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
@@ -1176,6 +1212,15 @@ func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 		if vaulterrors.IsNotFound(err) {
 			statusCode = http.StatusNotFound
 		}
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretDelete,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, fmt.Sprintf("Failed to delete secret: %v", err), statusCode)
 		return
 	}
@@ -2177,4 +2222,3 @@ func decryptData(key, ciphertext []byte) ([]byte, error) {
 	nonce, ct := ciphertext[:aesGCM.NonceSize()], ciphertext[aesGCM.NonceSize():]
 	return aesGCM.Open(nil, nonce, ct, nil)
 }
-
