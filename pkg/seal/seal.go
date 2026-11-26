@@ -244,6 +244,20 @@ func (m *Manager) SubmitUnsealKey(keyHex string) (bool, error) {
 		return false, fmt.Errorf("invalid key format: %w", err)
 	}
 
+	// A share is one x-coordinate byte (1..255) followed by one byte per
+	// master-key byte. Reject anything else before it can poison the
+	// reconstruction, and reject a share that was already submitted: a
+	// repeated x-coordinate makes Lagrange interpolation divide by zero, so a
+	// single key holder could otherwise burn the whole unseal attempt.
+	if len(keyBytes) != masterKeySize+shareOverhead || keyBytes[0] == 0 {
+		return false, errors.New("invalid key share")
+	}
+	for _, existing := range m.unsealProgress {
+		if existing[0] == keyBytes[0] {
+			return false, errors.New("duplicate key share: this share was already submitted")
+		}
+	}
+
 	// Add to progress
 	m.unsealProgress = append(m.unsealProgress, keyBytes)
 
@@ -375,7 +389,10 @@ func (m *Manager) RotateShares(newShares, newThreshold int) (*RotateSharesRespon
 		return nil, err
 	}
 
-	// Commit the new master key and share configuration
+	// Commit the new master key and share configuration, wiping the old one
+	for i := range m.masterKey {
+		m.masterKey[i] = 0
+	}
 	m.masterKey = newMasterKey
 	m.threshold = newThreshold
 	m.numShares = newShares
@@ -513,6 +530,9 @@ func decryptWithKey(key, ciphertext, nonce []byte) ([]byte, error) {
 // For simplicity and security, we operate on each byte independently using GF(256)
 
 const shareOverhead = 1 // 1 byte for the x-coordinate
+
+// masterKeySize is the length of the master key (AES-256)
+const masterKeySize = 32
 
 // Split splits a secret into n shares with a threshold of t
 func Split(secret []byte, n, t int) ([][]byte, error) {

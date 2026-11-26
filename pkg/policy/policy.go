@@ -48,6 +48,22 @@ type Policy struct {
 	Rules       []PathRule `json:"rules" yaml:"rules"`
 }
 
+// RootPolicyName is the built-in policy that grants every capability. It is
+// created by the server and cannot be updated or deleted through the API.
+const RootPolicyName = "root"
+
+// policyNamePattern restricts policy names to characters that are safe as a
+// file name: no path separators and no leading dot.
+var policyNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+// ValidateName reports whether name is an acceptable policy name.
+func ValidateName(name string) error {
+	if !policyNamePattern.MatchString(name) || strings.Contains(name, "..") {
+		return fmt.Errorf("%w: policy name %q must match %s", vaulterrors.ErrInvalidPath, name, policyNamePattern.String())
+	}
+	return nil
+}
+
 // Manager manages the policies in the system
 type Manager struct {
 	policiesDir string
@@ -169,6 +185,10 @@ func (m *Manager) CreatePolicy(policy *Policy) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	if err := ValidateName(policy.Name); err != nil {
+		return err
+	}
+
 	if err := m.validateAndCompilePolicy(policy); err != nil {
 		return err
 	}
@@ -209,12 +229,19 @@ func (m *Manager) UpdatePolicy(policy *Policy) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	if err := ValidateName(policy.Name); err != nil {
+		return err
+	}
+
 	if err := m.validateAndCompilePolicy(policy); err != nil {
 		return err
 	}
 
 	if _, exists := m.policies[policy.Name]; !exists {
 		return &vaulterrors.PolicyNotFoundError{Name: policy.Name}
+	}
+	if policy.Name == RootPolicyName {
+		return fmt.Errorf("%w: the root policy cannot be modified", vaulterrors.ErrPermissionDenied)
 	}
 
 	filePath := filepath.Join(m.policiesDir, policy.Name+".yaml")
@@ -238,6 +265,9 @@ func (m *Manager) DeletePolicy(name string) error {
 
 	if _, exists := m.policies[name]; !exists {
 		return &vaulterrors.PolicyNotFoundError{Name: name}
+	}
+	if name == RootPolicyName {
+		return fmt.Errorf("%w: the root policy cannot be deleted", vaulterrors.ErrPermissionDenied)
 	}
 
 	filePath := filepath.Join(m.policiesDir, name+".yaml")

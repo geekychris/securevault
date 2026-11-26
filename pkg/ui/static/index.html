@@ -281,7 +281,14 @@ function showModal(title, message, onConfirm) {
 }
 
 // ── Escape HTML ──────────────────────────────────────────────────────────
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+// esc escapes text for HTML element content and quoted attribute values.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// jsArg renders a value as a JS string literal safe to place inside a double-quoted
+// inline handler (onclick="fn(${jsArg(x)})"). HTML entities are decoded before the JS
+// is parsed, so esc() alone cannot protect a quoted JS string there.
+function jsArg(s) { return esc(JSON.stringify(String(s == null ? '' : s))); }
 function encodePath(p) { return p.split('/').map(s => encodeURIComponent(s)).join('/'); }
 
 // ── Render Engine ────────────────────────────────────────────────────────
@@ -603,7 +610,7 @@ function loadSecrets(path) {
     App.secrets.forEach(key => {
       const isDir = key.endsWith('/');
       const display = isDir ? key.slice(0, -1) : key;
-      html += `<div class="secret-item" onclick="secretClick('${esc(key)}')">
+      html += `<div class="secret-item" onclick="secretClick(${jsArg(key)})">
         <span class="icon">${isDir ? '&#128193;' : '&#128196;'}</span>
         <span class="name ${isDir ? 'folder' : ''}">${esc(display)}</span>
       </div>`;
@@ -695,7 +702,7 @@ function renderSecretDetail(c) {
       <div class="kv-row"><span class="kv-key">Version</span><span class="kv-value">${meta.version || 1}</span></div>
       <div class="kv-row"><span class="kv-key">Current Version</span><span class="kv-value">${currentVersion}</span></div>
       <div class="kv-row"><span class="kv-key">Created</span><span class="kv-value">${meta.created_time || 'N/A'}</span></div>
-      <div class="kv-row"><span class="kv-key">Created By</span><span class="kv-value">${meta.created_by || 'N/A'}</span></div>
+      <div class="kv-row"><span class="kv-key">Created By</span><span class="kv-value">${esc(meta.created_by || 'N/A')}</span></div>
     </div>`;
 }
 
@@ -773,7 +780,7 @@ function showCreateSecret() {
       <div class="card-header"><h3>Create Secret</h3></div>
       <div class="form-group">
         <label>Secret Path</label>
-        <input type="text" id="new-secret-path" placeholder="my/secret/path" value="${App.secretPath.join('/')}${App.secretPath.length ? '/' : ''}"/>
+        <input type="text" id="new-secret-path" placeholder="my/secret/path" value="${esc(App.secretPath.join('/') + (App.secretPath.length ? '/' : ''))}"/>
       </div>
       <div id="kv-inputs">
         <div class="kv-input-row">
@@ -907,10 +914,10 @@ function loadPolicies() {
       const desc = typeof p === 'object' ? (p.description || '') : '';
       const ruleCount = typeof p === 'object' && p.rules ? p.rules.length : '-';
       html += `<tr>
-        <td><a onclick="viewPolicy('${esc(name)}')" style="cursor:pointer">${esc(name)}</a></td>
+        <td><a onclick="viewPolicy(${jsArg(name)})" style="cursor:pointer">${esc(name)}</a></td>
         <td style="color:#999">${esc(desc)}</td>
         <td>${ruleCount}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deletePolicy('${esc(name)}')">Delete</button></td>
+        <td><button class="btn btn-danger btn-sm" onclick="deletePolicy(${jsArg(name)})">Delete</button></td>
       </tr>`;
     });
     html += '</tbody></table></div>';
@@ -945,7 +952,7 @@ function renderPolicyDetail(c) {
       <h2>${esc(p.name)}</h2>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-secondary btn-sm" onclick="editPolicy()">Edit</button>
-        <button class="btn btn-danger btn-sm" onclick="deletePolicy('${esc(p.name)}')">Delete</button>
+        <button class="btn btn-danger btn-sm" onclick="deletePolicy(${jsArg(p.name)})">Delete</button>
       </div>
     </div>
     <div class="card">
@@ -1045,7 +1052,7 @@ function editPolicy() {
         <button class="btn btn-secondary btn-sm" onclick="addPolicyRule()">+ Add Rule</button>
       </div>
       <div style="display:flex;gap:8px;">
-        <button class="btn btn-primary" onclick="updatePolicy('${esc(p.name)}')">Save</button>
+        <button class="btn btn-primary" onclick="updatePolicy(${jsArg(p.name)})">Save</button>
         <button class="btn btn-secondary" onclick="renderPage()">Cancel</button>
       </div>
     </div>`;
@@ -1193,7 +1200,7 @@ function createToken() {
         <div style="font-size:12px;color:#e9c46a;margin-bottom:12px;">Copy this token now. It will not be shown again.</div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
           <code style="flex:1;background:#0f0f1a;padding:10px;border-radius:4px;color:#e0e0e0;word-break:break-all;font-size:12px;border:1px solid #2a2a4a;">${esc(token)}</code>
-          <button class="btn btn-secondary btn-sm" onclick="navigator.clipboard.writeText('${esc(token)}');toast('Copied to clipboard','success')">Copy</button>
+          <button class="btn btn-secondary btn-sm" onclick="navigator.clipboard.writeText(${jsArg(token)});toast('Copied to clipboard','success')">Copy</button>
         </div>
         <div style="display:flex;gap:16px;font-size:12px;color:#888;">
           <span>Policies: ${(Array.isArray(policies) ? policies : [policies]).map(p => '<span class="tag">' + esc(p) + '</span>').join(' ')}</span>

@@ -72,6 +72,39 @@ type Backend interface {
 	DeleteSecret(path string, options DeleteOptions) error
 	ListSecrets(path string) ([]string, error)
 	GetSecretMetadata(path string) (*SecretMetadata, error)
+	UndeleteSecret(path string, versions []int) error
+}
+
+// ValidatePath checks that a secret path is relative and free of "." and ".."
+// segments, empty segments, backslashes and control characters, so it can
+// never resolve outside the secrets directory. An empty path is only valid
+// when allowEmpty is set (listing the root). A single trailing slash is
+// accepted only for listings.
+func ValidatePath(path string, allowEmpty bool) error {
+	if path == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("%w: path is required", vaulterrors.ErrInvalidPath)
+	}
+	if strings.HasPrefix(path, "/") || strings.Contains(path, "\\") {
+		return fmt.Errorf("%w: %q", vaulterrors.ErrInvalidPath, path)
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: control character in path", vaulterrors.ErrInvalidPath)
+		}
+	}
+	trimmed := path
+	if allowEmpty {
+		trimmed = strings.TrimSuffix(path, "/")
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%w: %q", vaulterrors.ErrInvalidPath, path)
+		}
+	}
+	return nil
 }
 
 // EncryptionKeyProvider provides the encryption key (from seal manager)
@@ -174,6 +207,9 @@ func (b *FileBackend) getSecretMetadataPath(path string) string {
 
 // WriteSecret writes a secret to the backend
 func (b *FileBackend) WriteSecret(path string, data map[string]interface{}, options WriteOptions) error {
+	if err := ValidatePath(path, false); err != nil {
+		return err
+	}
 	mu := b.getMutex(path)
 	mu.Lock()
 	defer mu.Unlock()
@@ -272,6 +308,9 @@ func (b *FileBackend) WriteSecret(path string, data map[string]interface{}, opti
 
 // ReadSecret reads a secret from the backend
 func (b *FileBackend) ReadSecret(path string, options ReadOptions) (*Secret, error) {
+	if err := ValidatePath(path, false); err != nil {
+		return nil, err
+	}
 	mu := b.getMutex(path)
 	mu.Lock()
 	defer mu.Unlock()
@@ -295,6 +334,10 @@ func (b *FileBackend) ReadSecret(path string, options ReadOptions) (*Secret, err
 		return nil, &vaulterrors.VersionDestroyedError{Path: path, Version: version}
 	}
 
+	if !versionMeta.DeletedTime.IsZero() {
+		return nil, &vaulterrors.VersionDeletedError{Path: path, Version: version}
+	}
+
 	versionPath := b.getSecretVersionPath(path, version)
 	encryptedData, err := os.ReadFile(versionPath)
 	if err != nil {
@@ -314,8 +357,18 @@ func (b *FileBackend) ReadSecret(path string, options ReadOptions) (*Secret, err
 	return &secret, nil
 }
 
-// DeleteSecret deletes a secret from the backend
+// DeleteSecret deletes versions of a secret, following KV v2 semantics:
+//
+//   - without Destroy, the listed versions (default: the current version) are
+//     soft-deleted: they stop being readable but can be restored with
+//     UndeleteSecret;
+//   - with Destroy, the listed versions (default: all versions) are destroyed:
+//     their data is removed from disk and cannot be recovered. Once every
+//     version is destroyed the secret and its metadata are removed.
 func (b *FileBackend) DeleteSecret(path string, options DeleteOptions) error {
+	if err := ValidatePath(path, false); err != nil {
+		return err
+	}
 	mu := b.getMutex(path)
 	mu.Lock()
 	defer mu.Unlock()
@@ -325,19 +378,18 @@ func (b *FileBackend) DeleteSecret(path string, options DeleteOptions) error {
 		return err
 	}
 
-	versionsToDelete := options.Versions
-	if len(versionsToDelete) == 0 && options.Destroy {
-		versionsToDelete = make([]int, 0, len(metadata.Versions))
-		for version := range metadata.Versions {
-			versionsToDelete = append(versionsToDelete, version)
-		}
-	}
-
 	now := time.Now()
-	secretPath := b.getSecretPath(path)
+	versions := options.Versions
 
 	if options.Destroy {
-		for _, version := range versionsToDelete {
+		if len(versions) == 0 {
+			versions = make([]int, 0, len(metadata.Versions))
+			for version := range metadata.Versions {
+				versions = append(versions, version)
+			}
+		}
+
+		for _, version := range versions {
 			versionMeta, exists := metadata.Versions[version]
 			if !exists {
 				continue
@@ -362,25 +414,61 @@ func (b *FileBackend) DeleteSecret(path string, options DeleteOptions) error {
 		}
 
 		if allDestroyed {
-			if err := os.RemoveAll(secretPath); err != nil {
+			if err := os.RemoveAll(b.getSecretPath(path)); err != nil {
 				return fmt.Errorf("failed to delete secret directory: %w", err)
 			}
-			b.mutexMap.Delete(path)
 			return nil
 		}
-	} else if len(options.Versions) > 0 {
-		for _, version := range options.Versions {
+	} else {
+		if len(versions) == 0 {
+			versions = []int{metadata.CurrentVersion}
+		}
+		for _, version := range versions {
 			versionMeta, exists := metadata.Versions[version]
-			if !exists {
+			if !exists || versionMeta.IsDestroyed || !versionMeta.DeletedTime.IsZero() {
 				continue
 			}
 			versionMeta.DeletedTime = now
 			versionMeta.DeletedBy = options.UserID
-			versionMeta.IsDestroyed = true
 		}
 	}
 
-	// Encrypt and save updated metadata
+	return b.writeMetadataLocked(path, metadata)
+}
+
+// UndeleteSecret restores soft-deleted versions of a secret (default: the
+// current version). Destroyed versions cannot be restored and are skipped.
+func (b *FileBackend) UndeleteSecret(path string, versions []int) error {
+	if err := ValidatePath(path, false); err != nil {
+		return err
+	}
+	mu := b.getMutex(path)
+	mu.Lock()
+	defer mu.Unlock()
+
+	metadata, err := b.getSecretMetadataLocked(path)
+	if err != nil {
+		return err
+	}
+
+	if len(versions) == 0 {
+		versions = []int{metadata.CurrentVersion}
+	}
+	for _, version := range versions {
+		versionMeta, exists := metadata.Versions[version]
+		if !exists || versionMeta.IsDestroyed {
+			continue
+		}
+		versionMeta.DeletedTime = time.Time{}
+		versionMeta.DeletedBy = ""
+	}
+
+	return b.writeMetadataLocked(path, metadata)
+}
+
+// writeMetadataLocked encrypts and atomically replaces a secret's metadata
+// (caller must hold the path lock).
+func (b *FileBackend) writeMetadataLocked(path string, metadata *SecretMetadata) error {
 	metadataBytes, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
@@ -407,6 +495,9 @@ func (b *FileBackend) DeleteSecret(path string, options DeleteOptions) error {
 
 // ListSecrets lists secrets at a specific path
 func (b *FileBackend) ListSecrets(path string) ([]string, error) {
+	if err := ValidatePath(path, true); err != nil {
+		return nil, err
+	}
 	dirPath := filepath.Join(b.basePath, "secrets", path)
 
 	info, err := os.Stat(dirPath)
@@ -463,6 +554,9 @@ func (b *FileBackend) ListSecrets(path string) ([]string, error) {
 
 // GetSecretMetadata gets metadata about a secret (public - acquires its own lock)
 func (b *FileBackend) GetSecretMetadata(path string) (*SecretMetadata, error) {
+	if err := ValidatePath(path, false); err != nil {
+		return nil, err
+	}
 	mu := b.getMutex(path)
 	mu.Lock()
 	defer mu.Unlock()

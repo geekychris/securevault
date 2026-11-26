@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ const (
 	EventSecretDelete   EventType = "secret.delete"
 	EventSecretList     EventType = "secret.list"
 	EventSecretMetadata EventType = "secret.metadata"
+	EventSecretUndelete EventType = "secret.undelete"
 
 	EventTokenCreate EventType = "token.create"
 	EventTokenRenew  EventType = "token.renew"
@@ -155,8 +157,10 @@ func (l *FileLogger) Log(event Event) error {
 		event.Timestamp = time.Now()
 	}
 
-	// Mask the token ID for security - only show prefix
-	if len(event.TokenID) > 6 {
+	// Never write a usable token to the log. The server passes token
+	// accessors ("accessor:..."), which are kept as-is so events can be
+	// correlated; anything that looks like a raw token ("s.") is truncated.
+	if strings.HasPrefix(event.TokenID, "s.") && len(event.TokenID) > 6 {
 		event.TokenID = event.TokenID[:6] + "..."
 	}
 
