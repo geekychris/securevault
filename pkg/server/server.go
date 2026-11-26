@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -257,6 +258,18 @@ func (u *unsealLockout) RecordSuccess(key string) {
 	defer u.mu.Unlock()
 
 	delete(u.entries, key)
+}
+
+// lockoutKey extracts the host portion of a request's RemoteAddr, dropping
+// the ephemeral source port so that an attacker reconnecting on a new TCP
+// connection for every attempt cannot evade the lockout by getting a fresh
+// key each time. Falls back to the raw address if it isn't host:port.
+func lockoutKey(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -798,7 +811,7 @@ func (s *Server) initHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
-	source := r.RemoteAddr
+	source := lockoutKey(r.RemoteAddr)
 
 	if s.unsealLockout != nil {
 		if allowed, retryAfter := s.unsealLockout.Allow(source); !allowed {

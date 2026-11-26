@@ -77,6 +77,25 @@ func doRequest(srv *Server, method, path, token string, body interface{}) *httpt
 	return rr
 }
 
+func doRequestFromAddr(srv *Server, method, path, token string, body interface{}, remoteAddr string) *httptest.ResponseRecorder {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyBytes, _ := json.Marshal(body)
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	req := httptest.NewRequest(method, path, bodyReader)
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remoteAddr
+
+	rr := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rr, req)
+	return rr
+}
+
 func TestServerSetup(t *testing.T) {
 	srv, _, cleanup := testServer(t)
 	defer cleanup()
@@ -627,6 +646,30 @@ func TestUnsealLockoutTableDriven(t *testing.T) {
 	}
 }
 
+func TestLockoutKeyStripsEphemeralPort(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{name: "host and port", remoteAddr: "203.0.113.7:54321", want: "203.0.113.7"},
+		{name: "same host, different port", remoteAddr: "203.0.113.7:9999", want: "203.0.113.7"},
+		{name: "IPv6 with port", remoteAddr: "[2001:db8::1]:8080", want: "2001:db8::1"},
+		{name: "no port falls back to raw value", remoteAddr: "not-a-host-port", want: "not-a-host-port"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, lockoutKey(tc.remoteAddr))
+		})
+	}
+
+	// Two addresses that share a host but differ only in ephemeral port must
+	// collide on the same lockout key, otherwise an attacker reconnecting on
+	// a fresh TCP connection for every attempt would never be locked out.
+	assert.Equal(t, lockoutKey("203.0.113.7:1111"), lockoutKey("203.0.113.7:2222"))
+}
+
 func TestUnsealLockoutResetOnSuccess(t *testing.T) {
 	threshold := 3
 	u := newUnsealLockout(threshold, time.Minute, time.Minute)
@@ -705,6 +748,33 @@ func TestUnsealHandlerLockout(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.False(t, srv.sealManager.IsSealed())
+}
+
+// TestUnsealHandlerLockoutAcrossConnections proves the lockout is keyed by
+// host, not by the raw RemoteAddr, so an attacker who reconnects (getting a
+// new ephemeral source port) on every attempt still gets locked out.
+func TestUnsealHandlerLockoutAcrossConnections(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 1)
+
+	// Three wrong-key attempts, each from a distinct source port (simulating
+	// a fresh TCP connection per attempt), each evaluated and rejected.
+	ports := []string{"54321", "60000", "12345"}
+	for _, port := range ports {
+		rr := doRequestFromAddr(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		}, "203.0.113.7:"+port)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// A 4th attempt from yet another new port, even with the correct key,
+	// must still be rejected without evaluation: the host, not the
+	// connection, is locked out.
+	rr := doRequestFromAddr(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	}, "203.0.113.7:9999")
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.NotEmpty(t, rr.Header().Get("Retry-After"))
+	assert.True(t, srv.sealManager.IsSealed())
 }
 
 func TestUnsealHandlerSuccessResetsLockoutCounter(t *testing.T) {
