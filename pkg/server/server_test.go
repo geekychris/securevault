@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1007,6 +1008,186 @@ func TestUnsealLockoutResetOnSuccess(t *testing.T) {
 	}
 	allowed, _ = u.Allow("1.2.3.4")
 	assert.True(t, allowed, "a success must fully clear prior failures, not partially credit them")
+}
+
+func TestLockoutEntryIsStale(t *testing.T) {
+	window := time.Minute
+	base := time.Now()
+
+	tests := []struct {
+		name  string
+		entry lockoutEntry
+		now   time.Time
+		want  bool
+	}{
+		{
+			name:  "currently locked out",
+			entry: lockoutEntry{firstFailureAt: base, lockedUntil: base.Add(time.Hour)},
+			now:   base.Add(time.Minute),
+			want:  false,
+		},
+		{
+			name:  "lockout has expired",
+			entry: lockoutEntry{firstFailureAt: base, lockedUntil: base.Add(time.Second)},
+			now:   base.Add(time.Hour),
+			want:  true,
+		},
+		{
+			name:  "never locked, window elapsed",
+			entry: lockoutEntry{firstFailureAt: base},
+			now:   base.Add(window + time.Second),
+			want:  true,
+		},
+		{
+			name:  "never locked, still within window",
+			entry: lockoutEntry{firstFailureAt: base},
+			now:   base.Add(window / 2),
+			want:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := tc.entry
+			assert.Equal(t, tc.want, entry.isStale(tc.now, window))
+		})
+	}
+}
+
+func TestUnsealLockoutSweepExpiredRemovesStaleEntries(t *testing.T) {
+	window := time.Minute
+	u := newUnsealLockout(3, window, time.Minute)
+	now := time.Now()
+
+	u.entries["stale-never-locked"] = &lockoutEntry{firstFailureAt: now.Add(-2 * window)}
+	u.entries["stale-lockout-expired"] = &lockoutEntry{firstFailureAt: now.Add(-2 * window), lockedUntil: now.Add(-time.Second)}
+	u.entries["active-locked"] = &lockoutEntry{firstFailureAt: now, lockedUntil: now.Add(time.Hour)}
+	u.entries["active-within-window"] = &lockoutEntry{firstFailureAt: now}
+
+	removed := u.sweepExpired(now)
+
+	assert.Equal(t, 2, removed)
+	assert.NotContains(t, u.entries, "stale-never-locked")
+	assert.NotContains(t, u.entries, "stale-lockout-expired")
+	assert.Contains(t, u.entries, "active-locked")
+	assert.Contains(t, u.entries, "active-within-window")
+}
+
+// TestUnsealLockoutSweepBoundsGrowthFromManyDistinctHosts is the direct proof
+// that attempts from an unbounded number of distinct source hosts do not
+// grow entries without bound: a sweep after the window elapses reclaims all
+// of them.
+func TestUnsealLockoutSweepBoundsGrowthFromManyDistinctHosts(t *testing.T) {
+	window := 20 * time.Millisecond
+	u := newUnsealLockout(1000, window, time.Minute)
+
+	const numHosts = 500
+	for i := 0; i < numHosts; i++ {
+		u.RecordFailure(fmt.Sprintf("10.0.0.%d", i))
+	}
+	assert.Len(t, u.entries, numHosts)
+
+	time.Sleep(2 * window)
+
+	removed := u.sweepExpired(time.Now())
+	assert.Equal(t, numHosts, removed)
+	assert.Empty(t, u.entries)
+}
+
+func TestUnsealLockoutStartSweeperRemovesStaleEntriesOverTime(t *testing.T) {
+	window := 10 * time.Millisecond
+	u := newUnsealLockout(1000, window, time.Minute)
+	u.RecordFailure("1.2.3.4")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go u.startSweeper(ctx, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		return len(u.entries) == 0
+	}, time.Second, 5*time.Millisecond, "sweeper never removed the stale entry")
+}
+
+func TestUnsealLockoutStartSweeperStopsOnContextCancel(t *testing.T) {
+	u := newUnsealLockout(1000, time.Minute, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		u.startSweeper(ctx, time.Millisecond)
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("startSweeper did not return after context cancellation")
+	}
+}
+
+func TestServerStartEnablesLockoutSweeperAndShutdownStopsIt(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = getFreePort()
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = true
+	config.UnsealLockout.Threshold = 5
+	config.UnsealLockout.WindowSeconds = 900
+	config.UnsealLockout.LockoutSeconds = 900
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	go srv.Start()
+
+	require.Eventually(t, func() bool {
+		return srv.lockoutSweepCancel != nil
+	}, time.Second, 5*time.Millisecond, "lockout sweeper was never started")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.NoError(t, srv.Shutdown(ctx))
+}
+
+func TestServerStartWithoutLockoutLeavesSweeperDisabled(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = getFreePort()
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = false
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+	require.Nil(t, srv.unsealLockout)
+
+	go srv.Start()
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Nil(t, srv.lockoutSweepCancel)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.NoError(t, srv.Shutdown(ctx))
 }
 
 // unsealLockoutTestServer creates a sealed, initialized server with the given

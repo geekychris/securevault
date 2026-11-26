@@ -122,6 +122,7 @@ type Server struct {
 	replicationReady   chan struct{}
 	rateLimiter        *RateLimiter
 	unsealLockout      *unsealLockout
+	lockoutSweepCancel context.CancelFunc
 	tokenStorePath     string
 
 	// Leader election and failover
@@ -188,6 +189,21 @@ type lockoutEntry struct {
 	lockedUntil    time.Time
 }
 
+// isStale reports whether entry no longer needs to be tracked: its lockout
+// (if any) has expired, or the failure window has lapsed with no lockout
+// ever being triggered.
+func (entry *lockoutEntry) isStale(now time.Time, window time.Duration) bool {
+	if now.Before(entry.lockedUntil) {
+		return false
+	}
+	return !entry.lockedUntil.IsZero() || now.Sub(entry.firstFailureAt) > window
+}
+
+// unsealLockoutSweepInterval is how often a running Server sweeps its
+// unsealLockout for stale entries, so that attempts from an unbounded number
+// of distinct source hosts don't grow entries without bound.
+const unsealLockoutSweepInterval = time.Minute
+
 // unsealLockout enforces a hard lockout on a source after too many
 // consecutive failed unseal attempts within a sliding window.
 type unsealLockout struct {
@@ -224,9 +240,7 @@ func (u *unsealLockout) Allow(key string) (bool, time.Duration) {
 		return false, entry.lockedUntil.Sub(now)
 	}
 
-	// Lockout (if any) has expired, or the failure window has lapsed with no
-	// lockout ever being triggered: the entry is stale, drop it.
-	if !entry.lockedUntil.IsZero() || now.Sub(entry.firstFailureAt) > u.window {
+	if entry.isStale(now, u.window) {
 		delete(u.entries, key)
 	}
 
@@ -258,6 +272,40 @@ func (u *unsealLockout) RecordSuccess(key string) {
 	defer u.mu.Unlock()
 
 	delete(u.entries, key)
+}
+
+// sweepExpired removes every stale entry (lockout expired, or failure window
+// lapsed with no lockout ever triggered), so that entries from sources that
+// are never revisited don't accumulate forever. It returns the number of
+// entries removed.
+func (u *unsealLockout) sweepExpired(now time.Time) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	removed := 0
+	for key, entry := range u.entries {
+		if entry.isStale(now, u.window) {
+			delete(u.entries, key)
+			removed++
+		}
+	}
+	return removed
+}
+
+// startSweeper periodically removes stale entries from u.entries until ctx
+// is canceled.
+func (u *unsealLockout) startSweeper(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			u.sweepExpired(time.Now())
+		}
+	}
 }
 
 // lockoutKey extracts the host portion of a request's RemoteAddr, dropping
@@ -607,6 +655,15 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start the unseal lockout sweeper, if lockout is enabled, so that
+	// entries from sources that are never revisited don't accumulate
+	// without bound.
+	if s.unsealLockout != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.lockoutSweepCancel = cancel
+		go s.unsealLockout.startSweeper(ctx, unsealLockoutSweepInterval)
+	}
+
 	// Start main HTTP server
 	if s.config.Server.TLS.Enabled {
 		cert, err := tls.LoadX509KeyPair(s.config.Server.TLS.CertFile, s.config.Server.TLS.KeyFile)
@@ -638,6 +695,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Stop failover monitor
 	if s.failoverCancel != nil {
 		s.failoverCancel()
+	}
+
+	// Stop unseal lockout sweeper
+	if s.lockoutSweepCancel != nil {
+		s.lockoutSweepCancel()
 	}
 
 	// Persist tokens before shutdown
