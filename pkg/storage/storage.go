@@ -79,10 +79,10 @@ type EncryptionKeyProvider func() ([]byte, error)
 
 // FileBackend implements the Backend interface using the filesystem
 type FileBackend struct {
-	basePath     string
-	mutexMap     sync.Map
-	globalMu     sync.RWMutex // protects structural operations
-	getEncKey    EncryptionKeyProvider
+	basePath  string
+	mutexMap  sync.Map
+	globalMu  sync.RWMutex // protects structural operations
+	getEncKey EncryptionKeyProvider
 }
 
 // NewFileBackend creates a new file-based backend
