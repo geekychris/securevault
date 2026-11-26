@@ -130,6 +130,27 @@ curl -X POST http://127.0.0.1:8200/v1/sys/unseal -d '{"key": "key-3..."}'
 # → {"sealed": false}
 ```
 
+### Rotating unseal shares
+
+When a share-holder leaves, or you simply want to change the threshold, use
+`rotate-shares` to re-split the master key into a brand-new set of shares
+without re-encrypting any stored secrets. The vault must be unsealed and the
+request must carry a token with `update` capability on `sys/rotate-shares`
+(the root policy already has this). Rotation immediately invalidates every
+previously issued share — see [the key-rotation runbook](docs/runbooks/key-rotation.md)
+for the full procedure and operational guidance.
+
+```bash
+curl -X POST http://127.0.0.1:8200/v1/sys/rotate-shares \
+  -H "X-Vault-Token: $VAULT_TOKEN" \
+  -d '{"new_secret_shares": 5, "new_secret_threshold": 3}'
+# → {"keys": ["..."], "threshold": 3, "num_shares": 5}
+```
+
+```go
+resp, err := client.RotateShares(ctx, 5, 3)
+```
+
 ## REST API
 
 | Method | Path | Description |
@@ -137,6 +158,7 @@ curl -X POST http://127.0.0.1:8200/v1/sys/unseal -d '{"key": "key-3..."}'
 | `POST` | `/v1/sys/init` | Initialize vault |
 | `POST` | `/v1/sys/unseal` | Submit unseal key |
 | `POST` | `/v1/sys/seal` | Seal vault |
+| `POST` | `/v1/sys/rotate-shares` | Re-share the master key under a new threshold/share set |
 | `GET` | `/v1/sys/seal-status` | Seal status |
 | `GET` | `/v1/health` | Health check |
 | `POST` | `/v1/secret/{path}` | Write secret |
