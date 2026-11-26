@@ -27,6 +27,13 @@ replication:
   # No replication for testing
   mode: "standalone"
 
+# Unseal lockout configuration
+unseal_lockout:
+  enabled: true
+  threshold: 5
+  window_seconds: 900
+  lockout_seconds: 900
+
 # Logging configuration
 logging:
   # More verbose logging during testing
