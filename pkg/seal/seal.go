@@ -43,23 +43,23 @@ type SealStatus struct {
 
 // Manager manages the seal/unseal lifecycle
 type Manager struct {
-	mu              sync.RWMutex
-	sealed          bool
-	initialized     bool
-	masterKey       []byte
-	encryptionKey   []byte // derived from master key, used to encrypt data
-	threshold       int
-	numShares       int
-	unsealProgress  [][]byte // key shares submitted so far
-	sealDataPath    string   // path to persist encrypted seal data
+	mu             sync.RWMutex
+	sealed         bool
+	initialized    bool
+	masterKey      []byte
+	encryptionKey  []byte // derived from master key, used to encrypt data
+	threshold      int
+	numShares      int
+	unsealProgress [][]byte // key shares submitted so far
+	sealDataPath   string   // path to persist encrypted seal data
 }
 
 // sealData is persisted to disk - contains the encrypted master key info
 type sealData struct {
 	// EncryptedMasterKey is the master key encrypted with itself (for validation)
-	MasterKeyHash  string `json:"master_key_hash"`
-	Threshold      int    `json:"threshold"`
-	NumShares      int    `json:"num_shares"`
+	MasterKeyHash string `json:"master_key_hash"`
+	Threshold     int    `json:"threshold"`
+	NumShares     int    `json:"num_shares"`
 	// EncryptedEncKey is the encryption key encrypted with the master key
 	EncryptedEncKey string `json:"encrypted_enc_key"`
 	// Nonce used for encrypting the encryption key
@@ -562,8 +562,8 @@ func lagrangeInterpolate(xCoords, yCoords []byte) byte {
 			}
 			// basis *= (0 - x_j) / (x_i - x_j) = x_j / (x_i - x_j) in GF(256)
 			// Note: in GF(256), subtraction is XOR (same as addition)
-			num := xCoords[j]                                // 0 XOR x_j = x_j
-			denom := gf256Add(xCoords[i], xCoords[j])       // x_i XOR x_j
+			num := xCoords[j]                         // 0 XOR x_j = x_j
+			denom := gf256Add(xCoords[i], xCoords[j]) // x_i XOR x_j
 			basis = gf256Mul(basis, gf256Div(num, denom))
 		}
 

@@ -58,7 +58,7 @@ func main() {
 			for i, key := range initResp.Keys {
 				fmt.Printf("  Key %d: %s\n", i+1, key)
 			}
-			fmt.Println("\n*** SAVE THESE KEYS SECURELY ***\n")
+			fmt.Print("\n*** SAVE THESE KEYS SECURELY ***\n\n")
 
 			token = initResp.RootToken
 

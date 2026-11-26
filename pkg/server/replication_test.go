@@ -27,11 +27,11 @@ func getFreePort() int {
 
 // clusterNode holds a running server and its metadata
 type clusterNode struct {
-	server    *Server
-	rootToken string
-	apiPort   int
+	server      *Server
+	rootToken   string
+	apiPort     int
 	clusterPort int
-	tmpDir    string
+	tmpDir      string
 }
 
 func (n *clusterNode) apiAddr() string {

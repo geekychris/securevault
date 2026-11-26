@@ -193,10 +193,10 @@ func TestGenerateToken(t *testing.T) {
 
 func TestGF256Arithmetic(t *testing.T) {
 	// Test basic properties
-	assert.Equal(t, byte(0), gf256Add(42, 42))     // x XOR x = 0
-	assert.Equal(t, byte(42), gf256Add(42, 0))      // x XOR 0 = x
-	assert.Equal(t, byte(0), gf256Mul(42, 0))        // x * 0 = 0
-	assert.Equal(t, byte(42), gf256Mul(42, 1))       // x * 1 = x
+	assert.Equal(t, byte(0), gf256Add(42, 42)) // x XOR x = 0
+	assert.Equal(t, byte(42), gf256Add(42, 0)) // x XOR 0 = x
+	assert.Equal(t, byte(0), gf256Mul(42, 0))  // x * 0 = 0
+	assert.Equal(t, byte(42), gf256Mul(42, 1)) // x * 1 = x
 
 	// Test inverse
 	for i := byte(1); i != 0; i++ {

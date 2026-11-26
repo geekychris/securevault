@@ -220,12 +220,12 @@ func NewClient(address, token string, options ...ClientOption) (*Client, error) 
 	if address == "" {
 		return nil, errors.New("address is required")
 	}
-	
+
 	// Add protocol if missing
 	if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
 		address = "https://" + address
 	}
-	
+
 	// Validate address is a valid URL
 	_, err := url.Parse(address)
 	if err != nil {
@@ -271,7 +271,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		return nil, fmt.Errorf("invalid address: %w", err)
 	}
 	u.Path = path
-	
+
 	// Prepare request body
 	var bodyReader io.Reader
 	if body != nil {
@@ -299,7 +299,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	// Execute request with retries
 	var resp *http.Response
 	var lastErr error
-	
+
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		// Only wait if this is a retry
 		if attempt > 0 {
@@ -315,9 +315,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		if err == nil {
 			break
 		}
-		
+
 		lastErr = err
-		
+
 		// Don't retry if context cancelled or timeout
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
@@ -330,7 +330,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		}
 		return nil, errors.New("request failed after max retries")
 	}
-	
+
 	defer resp.Body.Close()
 
 	// Read response body
@@ -344,11 +344,11 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		var errResp struct {
 			Error string `json:"error"`
 		}
-		
+
 		if err := json.Unmarshal(responseBody, &errResp); err == nil && errResp.Error != "" {
 			return nil, ClientError{StatusCode: resp.StatusCode, Message: errResp.Error}
 		}
-		
+
 		// If we can't parse the error, return a generic error
 		return nil, ClientError{
 			StatusCode: resp.StatusCode,
@@ -371,7 +371,7 @@ func (c *Client) WriteSecret(ctx context.Context, path string, data map[string]i
 	requestBody := map[string]interface{}{
 		"data": data,
 	}
-	
+
 	if opts.Metadata != nil {
 		requestBody["metadata"] = opts.Metadata
 	}
@@ -420,15 +420,15 @@ func (c *Client) DeleteSecret(ctx context.Context, path string, options ...Delet
 
 	// Build URL
 	apiURL := "/v1/secret/" + path
-	
+
 	// Add query parameters for options if needed
 	if opts.Destroy || len(opts.Versions) > 0 {
 		query := url.Values{}
-		
+
 		if opts.Destroy {
 			query.Set("destroy", "true")
 		}
-		
+
 		if len(opts.Versions) > 0 {
 			versions := make([]string, len(opts.Versions))
 			for i, v := range opts.Versions {
@@ -436,7 +436,7 @@ func (c *Client) DeleteSecret(ctx context.Context, path string, options ...Delet
 			}
 			query.Set("versions", strings.Join(versions, ","))
 		}
-		
+
 		apiURL = apiURL + "?" + query.Encode()
 	}
 
