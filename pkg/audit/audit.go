@@ -30,9 +30,10 @@ const (
 	EventPolicyRead   EventType = "policy.read"
 	EventPolicyList   EventType = "policy.list"
 
-	EventSeal   EventType = "sys.seal"
-	EventUnseal EventType = "sys.unseal"
-	EventInit   EventType = "sys.init"
+	EventSeal         EventType = "sys.seal"
+	EventUnseal       EventType = "sys.unseal"
+	EventInit         EventType = "sys.init"
+	EventRotateShares EventType = "sys.rotate_shares"
 
 	EventAuthFailed EventType = "auth.failed"
 
