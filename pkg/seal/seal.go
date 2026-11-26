@@ -375,6 +375,12 @@ func (m *Manager) RotateShares(newShares, newThreshold int) (*RotateSharesRespon
 		return nil, err
 	}
 
+	// Zero the old master key before replacing it so it doesn't linger in
+	// memory once rotation invalidates it.
+	for i := range m.masterKey {
+		m.masterKey[i] = 0
+	}
+
 	// Commit the new master key and share configuration
 	m.masterKey = newMasterKey
 	m.threshold = newThreshold
