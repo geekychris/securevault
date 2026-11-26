@@ -31,6 +31,17 @@ type InitResponse struct {
 	RootToken string `json:"root_token"`
 }
 
+// RotateSharesResponse is returned when the master key is re-shared under a
+// new threshold/share set
+type RotateSharesResponse struct {
+	// Keys are the new unseal key shares (hex-encoded)
+	Keys []string `json:"keys"`
+	// Threshold is the new minimum number of shares needed to unseal
+	Threshold int `json:"threshold"`
+	// NumShares is the new total number of shares
+	NumShares int `json:"num_shares"`
+}
+
 // SealStatus represents the current seal status
 type SealStatus struct {
 	Sealed      bool   `json:"sealed"`
@@ -102,6 +113,30 @@ func (m *Manager) getSealFilePath() string {
 	return m.sealDataPath + "/seal.json"
 }
 
+// persistSealData writes sd to the seal data file, replacing any existing
+// file atomically via a write-then-rename so a crash mid-write can never
+// leave a truncated or partially-written seal.json behind.
+func (m *Manager) persistSealData(sd sealData) error {
+	sdBytes, err := json.Marshal(sd)
+	if err != nil {
+		return fmt.Errorf("failed to marshal seal data: %w", err)
+	}
+
+	if err := os.MkdirAll(m.sealDataPath, 0700); err != nil {
+		return fmt.Errorf("failed to create seal data directory: %w", err)
+	}
+
+	sealPath := m.getSealFilePath()
+	tmpPath := sealPath + ".tmp"
+	if err := os.WriteFile(tmpPath, sdBytes, 0600); err != nil {
+		return fmt.Errorf("failed to write seal data: %w", err)
+	}
+	if err := os.Rename(tmpPath, sealPath); err != nil {
+		return fmt.Errorf("failed to persist seal data: %w", err)
+	}
+	return nil
+}
+
 // Initialize sets up the vault for the first time, generating the master key
 // and splitting it into shares using Shamir's Secret Sharing
 func (m *Manager) Initialize(shares, threshold int) (*InitResponse, error) {
@@ -158,17 +193,8 @@ func (m *Manager) Initialize(shares, threshold int) (*InitResponse, error) {
 		EncKeyNonce:     hex.EncodeToString(nonce),
 	}
 
-	sdBytes, err := json.Marshal(sd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal seal data: %w", err)
-	}
-
-	if err := os.MkdirAll(m.sealDataPath, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create seal data directory: %w", err)
-	}
-
-	if err := os.WriteFile(m.getSealFilePath(), sdBytes, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write seal data: %w", err)
+	if err := m.persistSealData(sd); err != nil {
+		return nil, err
 	}
 
 	// Generate root token
@@ -288,6 +314,83 @@ func (m *Manager) Seal() error {
 	m.unsealProgress = nil
 
 	return nil
+}
+
+// RotateShares re-shares the master key under a new set of Shamir shares and
+// threshold, without touching the underlying data-encryption key or any
+// stored secrets. The old shares are invalidated: they can still reconstruct
+// the old master key via Combine, but that key no longer matches the
+// persisted hash and can no longer decrypt the re-wrapped encryption key.
+func (m *Manager) RotateShares(newShares, newThreshold int) (*RotateSharesResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.initialized {
+		return nil, errors.New("vault is not initialized")
+	}
+	if m.sealed {
+		return nil, errors.New("vault is sealed")
+	}
+
+	if newThreshold < 1 {
+		return nil, errors.New("threshold must be at least 1")
+	}
+	if newShares < newThreshold {
+		return nil, errors.New("shares must be >= threshold")
+	}
+	if newShares > 10 {
+		return nil, errors.New("maximum of 10 shares supported")
+	}
+
+	// Generate a brand-new master key
+	newMasterKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, newMasterKey); err != nil {
+		return nil, fmt.Errorf("failed to generate master key: %w", err)
+	}
+
+	// Split the new master key using Shamir's Secret Sharing
+	keyShares, err := Split(newMasterKey, newShares, newThreshold)
+	if err != nil {
+		return nil, fmt.Errorf("failed to split master key: %w", err)
+	}
+
+	// Re-wrap the unchanged data-encryption key under the new master key
+	encryptedEncKey, nonce, err := encryptWithKey(newMasterKey, m.encryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt encryption key: %w", err)
+	}
+
+	// Hash the new master key for later validation
+	hash := sha256.Sum256(newMasterKey)
+
+	sd := sealData{
+		MasterKeyHash:   hex.EncodeToString(hash[:]),
+		Threshold:       newThreshold,
+		NumShares:       newShares,
+		EncryptedEncKey: hex.EncodeToString(encryptedEncKey),
+		EncKeyNonce:     hex.EncodeToString(nonce),
+	}
+
+	if err := m.persistSealData(sd); err != nil {
+		return nil, err
+	}
+
+	// Commit the new master key and share configuration
+	m.masterKey = newMasterKey
+	m.threshold = newThreshold
+	m.numShares = newShares
+	m.unsealProgress = nil
+
+	hexKeys := make([]string, len(keyShares))
+	for i, share := range keyShares {
+		hexKeys[i] = hex.EncodeToString(share)
+	}
+
+	return &RotateSharesResponse{
+		Keys:      hexKeys,
+		Threshold: newThreshold,
+		NumShares: newShares,
+	}, nil
 }
 
 // IsSealed returns whether the vault is sealed

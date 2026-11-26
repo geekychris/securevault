@@ -648,6 +648,36 @@ func (c *Client) Seal(ctx context.Context) error {
 	return err
 }
 
+// RotateSharesResponse is returned when the master key is re-shared under a
+// new threshold/share set
+type RotateSharesResponse struct {
+	Keys      []string `json:"keys"`
+	Threshold int      `json:"threshold"`
+	NumShares int      `json:"num_shares"`
+}
+
+// RotateShares re-shares the master key under a new threshold/share set
+// without re-encrypting any stored secrets. The previous shares are
+// invalidated and can no longer unseal the vault. Requires authentication.
+func (c *Client) RotateShares(ctx context.Context, newSecretShares, newSecretThreshold int) (*RotateSharesResponse, error) {
+	req := map[string]int{
+		"new_secret_shares":    newSecretShares,
+		"new_secret_threshold": newSecretThreshold,
+	}
+
+	responseBody, err := c.doRequest(ctx, http.MethodPost, "/v1/sys/rotate-shares", req)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp RotateSharesResponse
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse rotate-shares response: %w", err)
+	}
+
+	return &resp, nil
+}
+
 // LookupToken looks up the current token's information
 func (c *Client) LookupToken(ctx context.Context) (map[string]interface{}, error) {
 	responseBody, err := c.doRequest(ctx, http.MethodGet, "/v1/auth/token/lookup-self", nil)
