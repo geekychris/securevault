@@ -19,13 +19,26 @@
         <java.version>21</java.version>
         
         <!-- Dependency versions -->
-        <httpclient.version>5.2.1</httpclient.version>
-        <jackson.version>2.15.2</jackson.version>
-        <slf4j.version>2.0.9</slf4j.version>
-        <logback.version>1.4.11</logback.version>
+        <httpclient.version>5.6.5</httpclient.version>
+        <jackson.version>2.18.12</jackson.version>
+        <slf4j.version>2.0.17</slf4j.version>
+        <logback.version>1.5.38</logback.version>
         <junit.version>5.10.0</junit.version>
         <mockito.version>5.6.0</mockito.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Keeps every Jackson module (including transitive jackson-core) on one patched release. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- HTTP Client -->
