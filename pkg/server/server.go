@@ -981,11 +981,15 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenID := r.Header.Get("X-Vault-Token")
+	path := r.PathValue("path")
+
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
 		s.auditLogger.Log(audit.Event{
 			Timestamp:  time.Now(),
 			Type:       audit.EventAuthFailed,
+			Path:       path,
+			TokenID:    tokenID,
 			RemoteAddr: r.RemoteAddr,
 			Success:    false,
 			Error:      err.Error(),
@@ -993,8 +997,6 @@ func (s *Server) writeSecretHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 		return
 	}
-
-	path := r.PathValue("path")
 
 	// Check if secret exists to determine create vs update capability
 	_, metaErr := s.storage.GetSecretMetadata(path)
@@ -1081,13 +1083,22 @@ func (s *Server) readSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenID := r.Header.Get("X-Vault-Token")
+	path := r.PathValue("path")
+
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 		return
 	}
-
-	path := r.PathValue("path")
 
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
 		s.auditLogger.Log(audit.Event{
@@ -1163,13 +1174,22 @@ func (s *Server) deleteSecretHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenID := r.Header.Get("X-Vault-Token")
+	path := r.PathValue("path")
+
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 		return
 	}
-
-	path := r.PathValue("path")
 
 	if !s.checkPermission(tokenInfo, path, policy.DeleteCapability) {
 		s.auditLogger.Log(audit.Event{
@@ -1243,15 +1263,33 @@ func (s *Server) getSecretMetadataHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	tokenID := r.Header.Get("X-Vault-Token")
+	path := r.PathValue("path")
+
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 		return
 	}
 
-	path := r.PathValue("path")
-
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretMetadata,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      "permission denied",
+		})
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
@@ -1262,6 +1300,15 @@ func (s *Server) getSecretMetadataHandler(w http.ResponseWriter, r *http.Request
 		if vaulterrors.IsNotFound(err) {
 			statusCode = http.StatusNotFound
 		}
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretMetadata,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, fmt.Sprintf("Failed to get metadata: %v", err), statusCode)
 		return
 	}
@@ -1364,13 +1411,23 @@ func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	tokenID := r.Header.Get("X-Vault-Token")
+	path := r.PathValue("path")
+
 	tokenInfo, err := s.validateToken(tokenID)
 	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventAuthFailed,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
 		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 		return
 	}
 
-	path := r.PathValue("path")
 	versionStr := r.PathValue("version")
 
 	version, err := strconv.Atoi(versionStr)
@@ -1380,6 +1437,16 @@ func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	if !s.checkPermission(tokenInfo, path, policy.ReadCapability) {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretRead,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      "permission denied",
+			Metadata:   map[string]interface{}{"version": version},
+		})
 		http.Error(w, "Permission denied", http.StatusForbidden)
 		return
 	}
@@ -1392,9 +1459,29 @@ func (s *Server) getSecretVersionHandler(w http.ResponseWriter, r *http.Request)
 		} else if vaulterrors.IsVersionDestroyed(err) {
 			statusCode = http.StatusGone
 		}
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventSecretRead,
+			Path:       path,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+			Metadata:   map[string]interface{}{"version": version},
+		})
 		http.Error(w, fmt.Sprintf("Version error: %v", err), statusCode)
 		return
 	}
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventSecretRead,
+		Path:       path,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+		Metadata:   map[string]interface{}{"version": version},
+	})
 
 	response := map[string]interface{}{
 		"data": secret.Data,

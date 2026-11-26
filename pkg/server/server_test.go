@@ -611,6 +611,42 @@ func TestSecretAuditRecordShape(t *testing.T) {
 			wantSuccess: false,
 			wantErr:     "permission denied",
 		},
+		{
+			name:        "read_invalid_token",
+			path:        "secret-test/read-invalid-token",
+			eventType:   audit.EventAuthFailed,
+			setup:       seedSecret,
+			method:      "GET",
+			url:         "/v1/secret/secret-test/read-invalid-token",
+			token:       "s.not-a-real-token",
+			wantStatus:  http.StatusUnauthorized,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+		{
+			name:        "write_invalid_token",
+			path:        "secret-test/write-invalid-token",
+			eventType:   audit.EventAuthFailed,
+			method:      "POST",
+			url:         "/v1/secret/secret-test/write-invalid-token",
+			body:        writeBody,
+			token:       "s.not-a-real-token",
+			wantStatus:  http.StatusUnauthorized,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+		{
+			name:        "delete_invalid_token",
+			path:        "secret-test/delete-invalid-token",
+			eventType:   audit.EventAuthFailed,
+			setup:       seedSecret,
+			method:      "DELETE",
+			url:         "/v1/secret/secret-test/delete-invalid-token?destroy=true",
+			token:       "s.not-a-real-token",
+			wantStatus:  http.StatusUnauthorized,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
 	}
 
 	for _, tc := range tests {
@@ -629,6 +665,111 @@ func TestSecretAuditRecordShape(t *testing.T) {
 			got := events[len(events)-1]
 			assert.Equal(t, tc.eventType, got.Type)
 			assert.Equal(t, tc.path, got.Path)
+			assert.Equal(t, tc.wantSuccess, got.Success)
+
+			switch tc.wantErr {
+			case "":
+				assert.Empty(t, got.Error)
+			case "-":
+				assert.NotEmpty(t, got.Error)
+			default:
+				assert.Equal(t, tc.wantErr, got.Error)
+			}
+		})
+	}
+}
+
+// TestSecretVersionAuditTrail covers getSecretVersionHandler, which read a
+// specific secret version without appending any audit record at all.
+func TestSecretVersionAuditTrail(t *testing.T) {
+	srv, rootToken, cleanup := testServer(t)
+	defer cleanup()
+
+	rr := doRequest(srv, "POST", "/v1/policies", rootToken, map[string]interface{}{
+		"policy": map[string]interface{}{
+			"name":        "no-access-version",
+			"description": "No access to secret-version-test/*",
+			"rules": []map[string]interface{}{
+				{"path": "other/*", "capabilities": []string{"read", "create", "update", "delete", "list"}},
+			},
+		},
+	})
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	rr = doRequest(srv, "POST", "/v1/auth/token/create", rootToken, map[string]interface{}{
+		"policy_ids": []string{"no-access-version"},
+		"ttl":        "1h",
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+	var tokenResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &tokenResp))
+	deniedToken := tokenResp["auth"].(map[string]interface{})["client_token"].(string)
+
+	const path = "secret-version-test/item"
+	rr = doRequest(srv, "POST", "/v1/secret/"+path, rootToken, map[string]interface{}{
+		"data": map[string]interface{}{"k": "v"},
+	})
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	tests := []struct {
+		name        string
+		url         string
+		token       string
+		wantStatus  int
+		wantType    audit.EventType
+		wantSuccess bool
+		wantErr     string // "" means expect empty; "-" means expect non-empty; else exact match
+	}{
+		{
+			name:        "version_read_success",
+			url:         "/v1/secret/versions/1/" + path,
+			token:       rootToken,
+			wantStatus:  http.StatusOK,
+			wantType:    audit.EventSecretRead,
+			wantSuccess: true,
+			wantErr:     "",
+		},
+		{
+			name:        "version_read_not_found",
+			url:         "/v1/secret/versions/99/" + path,
+			token:       rootToken,
+			wantStatus:  http.StatusNotFound,
+			wantType:    audit.EventSecretRead,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+		{
+			name:        "version_read_denied",
+			url:         "/v1/secret/versions/1/" + path,
+			token:       deniedToken,
+			wantStatus:  http.StatusForbidden,
+			wantType:    audit.EventSecretRead,
+			wantSuccess: false,
+			wantErr:     "permission denied",
+		},
+		{
+			name:        "version_read_invalid_token",
+			url:         "/v1/secret/versions/1/" + path,
+			token:       "s.not-a-real-token",
+			wantStatus:  http.StatusUnauthorized,
+			wantType:    audit.EventAuthFailed,
+			wantSuccess: false,
+			wantErr:     "-",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := doRequest(srv, "GET", tc.url, tc.token, nil)
+			assert.Equal(t, tc.wantStatus, rr.Code)
+
+			events, err := srv.auditLogger.Query(audit.QueryFilter{Type: tc.wantType, Path: path})
+			require.NoError(t, err)
+			require.NotEmpty(t, events, "expected an audit event for path %s", path)
+
+			got := events[len(events)-1]
+			assert.Equal(t, tc.wantType, got.Type)
+			assert.Equal(t, path, got.Path)
 			assert.Equal(t, tc.wantSuccess, got.Success)
 
 			switch tc.wantErr {
