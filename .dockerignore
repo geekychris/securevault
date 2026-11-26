@@ -1,0 +1,16 @@
+# Keep vault state, keys and build output out of the image build context
+data/
+**/data/
+*.enc
+*.key
+root_keys_dont_checkin.json
+restarting.md
+bin/
+coverage.out
+.git/
+.idea/
+.vscode/
+clients/java/target/
+clients/rust/target/
+examples/**/target/
+**/__pycache__/
