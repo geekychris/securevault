@@ -894,3 +894,165 @@ func TestWriteRequiresCreateForNewSecrets(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 }
+
+func TestUnsealLockoutTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		threshold  int
+		window     time.Duration
+		lockoutDur time.Duration
+		failures   int
+		sleepAfter time.Duration
+		wantAllow  bool
+	}{
+		{
+			name:       "under threshold still allowed",
+			threshold:  5,
+			window:     time.Minute,
+			lockoutDur: time.Minute,
+			failures:   4,
+			wantAllow:  true,
+		},
+		{
+			name:       "threshold triggers lockout",
+			threshold:  5,
+			window:     time.Minute,
+			lockoutDur: time.Minute,
+			failures:   5,
+			wantAllow:  false,
+		},
+		{
+			name:       "lockout expires after configured duration",
+			threshold:  3,
+			window:     time.Minute,
+			lockoutDur: 20 * time.Millisecond,
+			failures:   3,
+			sleepAfter: 40 * time.Millisecond,
+			wantAllow:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUnsealLockout(tc.threshold, tc.window, tc.lockoutDur)
+			for i := 0; i < tc.failures; i++ {
+				u.RecordFailure("1.2.3.4")
+			}
+			if tc.sleepAfter > 0 {
+				time.Sleep(tc.sleepAfter)
+			}
+			allowed, _ := u.Allow("1.2.3.4")
+			assert.Equal(t, tc.wantAllow, allowed)
+		})
+	}
+}
+
+func TestUnsealLockoutResetOnSuccess(t *testing.T) {
+	threshold := 3
+	u := newUnsealLockout(threshold, time.Minute, time.Minute)
+
+	for i := 0; i < threshold-1; i++ {
+		u.RecordFailure("1.2.3.4")
+	}
+	allowed, _ := u.Allow("1.2.3.4")
+	require.True(t, allowed)
+
+	u.RecordSuccess("1.2.3.4")
+
+	for i := 0; i < threshold-1; i++ {
+		u.RecordFailure("1.2.3.4")
+	}
+	allowed, _ = u.Allow("1.2.3.4")
+	assert.True(t, allowed, "a success must fully clear prior failures, not partially credit them")
+}
+
+// unsealLockoutTestServer creates a sealed, initialized server with the given
+// unseal lockout settings, returning the server and the Shamir unseal keys.
+func unsealLockoutTestServer(t *testing.T, threshold, windowSeconds, lockoutSeconds int) (*Server, []string) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = 0
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = true
+	config.UnsealLockout.Threshold = threshold
+	config.UnsealLockout.WindowSeconds = windowSeconds
+	config.UnsealLockout.LockoutSeconds = lockoutSeconds
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	initResp, err := srv.sealManager.Initialize(1, 1)
+	require.NoError(t, err)
+
+	require.NoError(t, srv.sealManager.Seal())
+
+	return srv, initResp.Keys
+}
+
+func TestUnsealHandlerLockout(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 1)
+
+	// Three wrong-key attempts, each evaluated and rejected.
+	for i := 0; i < 3; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// The 4th attempt, even with the correct key, must be rejected without evaluation.
+	rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.NotEmpty(t, rr.Header().Get("Retry-After"))
+	assert.True(t, srv.sealManager.IsSealed())
+
+	// Wait for the lockout to expire.
+	time.Sleep(1200 * time.Millisecond)
+
+	rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.False(t, srv.sealManager.IsSealed())
+}
+
+func TestUnsealHandlerSuccessResetsLockoutCounter(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 900)
+
+	// Two wrong-key attempts (under the threshold of 3).
+	for i := 0; i < 2; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// Correct key succeeds and must reset the counter.
+	rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.False(t, srv.sealManager.IsSealed())
+
+	// Re-seal and repeat two more failures: they must not carry over past the
+	// intervening success, so neither should trip the lockout.
+	require.NoError(t, srv.sealManager.Seal())
+
+	for i := 0; i < 2; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+}

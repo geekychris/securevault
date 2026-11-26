@@ -42,6 +42,17 @@ audit:
   # Path to the audit log file
   path: "/var/log/securevault/audit.log"
 
+## Unseal Lockout
+## Locks out a source address after too many consecutive failed unseal attempts
+unseal_lockout:
+  enabled: true
+  # Consecutive failures within the window before lockout triggers
+  threshold: 5
+  # Sliding window during which failures are counted (seconds)
+  window_seconds: 900
+  # How long a source stays locked out once the threshold is hit (seconds)
+  lockout_seconds: 900
+
 ## Replication Configuration
 replication:
   # "standalone", "leader", or "follower"
