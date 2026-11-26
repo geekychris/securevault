@@ -298,6 +298,7 @@ func NewServer(config *Config) (*Server, error) {
 	mux.HandleFunc("POST /v1/sys/init", server.initHandler)
 	mux.HandleFunc("POST /v1/sys/unseal", server.unsealHandler)
 	mux.HandleFunc("POST /v1/sys/seal", server.sealHandler)
+	mux.HandleFunc("POST /v1/sys/rotate-shares", server.rotateSharesHandler)
 	mux.HandleFunc("GET /v1/sys/status", server.systemStatusHandler)
 	mux.HandleFunc("GET /v1/sys/replication/status", server.replicationStatusHandler)
 
@@ -758,6 +759,60 @@ func (s *Server) sealHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.sealManager.GetStatus())
+}
+
+func (s *Server) rotateSharesHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUnseal(w) {
+		return
+	}
+
+	// Require authentication to rotate shares
+	tokenID := r.Header.Get("X-Vault-Token")
+	tokenInfo, err := s.validateToken(tokenID)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	if !s.checkPermission(tokenInfo, "sys/rotate-shares", policy.UpdateCapability) {
+		http.Error(w, "Permission denied", http.StatusForbidden)
+		return
+	}
+
+	var req struct {
+		NewSecretShares    int `json:"new_secret_shares"`
+		NewSecretThreshold int `json:"new_secret_threshold"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := s.sealManager.RotateShares(req.NewSecretShares, req.NewSecretThreshold)
+	if err != nil {
+		s.auditLogger.Log(audit.Event{
+			Timestamp:  time.Now(),
+			Type:       audit.EventRotateShares,
+			TokenID:    tokenID,
+			RemoteAddr: r.RemoteAddr,
+			Success:    false,
+			Error:      err.Error(),
+		})
+		http.Error(w, fmt.Sprintf("Failed to rotate shares: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	s.auditLogger.Log(audit.Event{
+		Timestamp:  time.Now(),
+		Type:       audit.EventRotateShares,
+		TokenID:    tokenID,
+		RemoteAddr: r.RemoteAddr,
+		Success:    true,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) systemStatusHandler(w http.ResponseWriter, r *http.Request) {

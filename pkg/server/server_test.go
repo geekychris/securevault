@@ -894,3 +894,157 @@ func TestWriteRequiresCreateForNewSecrets(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 }
+
+func TestRotateSharesHandler_EndToEnd(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-rotate-e2e")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = 0
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 3
+	config.Seal.SecretThreshold = 2
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	rr := doRequest(srv, "POST", "/v1/sys/init", "", map[string]int{
+		"secret_shares":    3,
+		"secret_threshold": 2,
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var initResp seal.InitResponse
+	json.Unmarshal(rr.Body.Bytes(), &initResp)
+	rootToken := initResp.RootToken
+
+	// Write a secret before rotating
+	rr = doRequest(srv, "POST", "/v1/secret/app/db", rootToken, map[string]interface{}{
+		"data": map[string]interface{}{"password": "original-secret"},
+	})
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Rotate the shares
+	rr = doRequest(srv, "POST", "/v1/sys/rotate-shares", rootToken, map[string]interface{}{
+		"new_secret_shares":    5,
+		"new_secret_threshold": 3,
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var rotateResp seal.RotateSharesResponse
+	json.Unmarshal(rr.Body.Bytes(), &rotateResp)
+	assert.Len(t, rotateResp.Keys, 5)
+	assert.Equal(t, 3, rotateResp.Threshold)
+	assert.Equal(t, 5, rotateResp.NumShares)
+
+	// Seal then unseal with the new shares
+	rr = doRequest(srv, "POST", "/v1/sys/seal", rootToken, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var status seal.SealStatus
+	for i := 0; i < 3; i++ {
+		rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{"key": rotateResp.Keys[i]})
+		require.Equal(t, http.StatusOK, rr.Code)
+		json.Unmarshal(rr.Body.Bytes(), &status)
+	}
+	assert.False(t, status.Sealed)
+
+	// Confirm the data survived untouched
+	rr = doRequest(srv, "GET", "/v1/secret/app/db", rootToken, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var readResp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &readResp)
+	data := readResp["data"].(map[string]interface{})
+	assert.Equal(t, "original-secret", data["password"])
+}
+
+func TestRotateSharesHandler_OldSharesRejected(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-rotate-old")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = 0
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 3
+	config.Seal.SecretThreshold = 2
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	rr := doRequest(srv, "POST", "/v1/sys/init", "", map[string]int{
+		"secret_shares":    3,
+		"secret_threshold": 2,
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var initResp seal.InitResponse
+	json.Unmarshal(rr.Body.Bytes(), &initResp)
+	rootToken := initResp.RootToken
+	oldKeys := initResp.Keys
+
+	rr = doRequest(srv, "POST", "/v1/sys/rotate-shares", rootToken, map[string]interface{}{
+		"new_secret_shares":    5,
+		"new_secret_threshold": 3,
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	rr = doRequest(srv, "POST", "/v1/sys/seal", rootToken, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// The new threshold is 3, so the first two old shares just accumulate
+	// progress without triggering a reconstruction attempt.
+	rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{"key": oldKeys[0]})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{"key": oldKeys[1]})
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	// The third old share crosses the new threshold, triggering reconstruction
+	// of the OLD master key, which fails validation against the rotated seal data.
+	rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{"key": oldKeys[2]})
+	assert.NotEqual(t, http.StatusOK, rr.Code)
+
+	rr = doRequest(srv, "GET", "/v1/sys/seal-status", "", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var status seal.SealStatus
+	json.Unmarshal(rr.Body.Bytes(), &status)
+	assert.True(t, status.Sealed)
+}
+
+func TestRotateSharesHandler_RequiresUnseal(t *testing.T) {
+	srv, rootToken, cleanup := testServer(t)
+	defer cleanup()
+
+	require.NoError(t, srv.sealManager.Seal())
+
+	rr := doRequest(srv, "POST", "/v1/sys/rotate-shares", rootToken, map[string]interface{}{
+		"new_secret_shares":    3,
+		"new_secret_threshold": 2,
+	})
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+func TestRotateSharesHandler_RequiresAuth(t *testing.T) {
+	srv, _, cleanup := testServer(t)
+	defer cleanup()
+
+	rr := doRequest(srv, "POST", "/v1/sys/rotate-shares", "", map[string]interface{}{
+		"new_secret_shares":    3,
+		"new_secret_threshold": 2,
+	})
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+	rr = doRequest(srv, "POST", "/v1/sys/rotate-shares", "garbage-token", map[string]interface{}{
+		"new_secret_shares":    3,
+		"new_secret_threshold": 2,
+	})
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+}
