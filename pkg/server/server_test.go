@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,6 +73,25 @@ func doRequest(srv *Server, method, path, token string, body interface{}) *httpt
 		req.Header.Set("X-Vault-Token", token)
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func doRequestFromAddr(srv *Server, method, path, token string, body interface{}, remoteAddr string) *httptest.ResponseRecorder {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyBytes, _ := json.Marshal(body)
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	req := httptest.NewRequest(method, path, bodyReader)
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = remoteAddr
 
 	rr := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rr, req)
@@ -893,4 +913,397 @@ func TestWriteRequiresCreateForNewSecrets(t *testing.T) {
 		"data": map[string]interface{}{"key": "updated"},
 	})
 	assert.Equal(t, http.StatusNoContent, rr.Code)
+}
+
+func TestUnsealLockoutTableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		threshold  int
+		window     time.Duration
+		lockoutDur time.Duration
+		failures   int
+		sleepAfter time.Duration
+		wantAllow  bool
+	}{
+		{
+			name:       "under threshold still allowed",
+			threshold:  5,
+			window:     time.Minute,
+			lockoutDur: time.Minute,
+			failures:   4,
+			wantAllow:  true,
+		},
+		{
+			name:       "threshold triggers lockout",
+			threshold:  5,
+			window:     time.Minute,
+			lockoutDur: time.Minute,
+			failures:   5,
+			wantAllow:  false,
+		},
+		{
+			name:       "lockout expires after configured duration",
+			threshold:  3,
+			window:     time.Minute,
+			lockoutDur: 20 * time.Millisecond,
+			failures:   3,
+			sleepAfter: 40 * time.Millisecond,
+			wantAllow:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUnsealLockout(tc.threshold, tc.window, tc.lockoutDur)
+			for i := 0; i < tc.failures; i++ {
+				u.RecordFailure("1.2.3.4")
+			}
+			if tc.sleepAfter > 0 {
+				time.Sleep(tc.sleepAfter)
+			}
+			allowed, _ := u.Allow("1.2.3.4")
+			assert.Equal(t, tc.wantAllow, allowed)
+		})
+	}
+}
+
+func TestLockoutKeyStripsEphemeralPort(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{name: "host and port", remoteAddr: "203.0.113.7:54321", want: "203.0.113.7"},
+		{name: "same host, different port", remoteAddr: "203.0.113.7:9999", want: "203.0.113.7"},
+		{name: "IPv6 with port", remoteAddr: "[2001:db8::1]:8080", want: "2001:db8::1"},
+		{name: "no port falls back to raw value", remoteAddr: "not-a-host-port", want: "not-a-host-port"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, lockoutKey(tc.remoteAddr))
+		})
+	}
+
+	// Two addresses that share a host but differ only in ephemeral port must
+	// collide on the same lockout key, otherwise an attacker reconnecting on
+	// a fresh TCP connection for every attempt would never be locked out.
+	assert.Equal(t, lockoutKey("203.0.113.7:1111"), lockoutKey("203.0.113.7:2222"))
+}
+
+func TestUnsealLockoutResetOnSuccess(t *testing.T) {
+	threshold := 3
+	u := newUnsealLockout(threshold, time.Minute, time.Minute)
+
+	for i := 0; i < threshold-1; i++ {
+		u.RecordFailure("1.2.3.4")
+	}
+	allowed, _ := u.Allow("1.2.3.4")
+	require.True(t, allowed)
+
+	u.RecordSuccess("1.2.3.4")
+
+	for i := 0; i < threshold-1; i++ {
+		u.RecordFailure("1.2.3.4")
+	}
+	allowed, _ = u.Allow("1.2.3.4")
+	assert.True(t, allowed, "a success must fully clear prior failures, not partially credit them")
+}
+
+func TestLockoutEntryIsStale(t *testing.T) {
+	window := time.Minute
+	base := time.Now()
+
+	tests := []struct {
+		name  string
+		entry lockoutEntry
+		now   time.Time
+		want  bool
+	}{
+		{
+			name:  "currently locked out",
+			entry: lockoutEntry{firstFailureAt: base, lockedUntil: base.Add(time.Hour)},
+			now:   base.Add(time.Minute),
+			want:  false,
+		},
+		{
+			name:  "lockout has expired",
+			entry: lockoutEntry{firstFailureAt: base, lockedUntil: base.Add(time.Second)},
+			now:   base.Add(time.Hour),
+			want:  true,
+		},
+		{
+			name:  "never locked, window elapsed",
+			entry: lockoutEntry{firstFailureAt: base},
+			now:   base.Add(window + time.Second),
+			want:  true,
+		},
+		{
+			name:  "never locked, still within window",
+			entry: lockoutEntry{firstFailureAt: base},
+			now:   base.Add(window / 2),
+			want:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := tc.entry
+			assert.Equal(t, tc.want, entry.isStale(tc.now, window))
+		})
+	}
+}
+
+func TestUnsealLockoutSweepExpiredRemovesStaleEntries(t *testing.T) {
+	window := time.Minute
+	u := newUnsealLockout(3, window, time.Minute)
+	now := time.Now()
+
+	u.entries["stale-never-locked"] = &lockoutEntry{firstFailureAt: now.Add(-2 * window)}
+	u.entries["stale-lockout-expired"] = &lockoutEntry{firstFailureAt: now.Add(-2 * window), lockedUntil: now.Add(-time.Second)}
+	u.entries["active-locked"] = &lockoutEntry{firstFailureAt: now, lockedUntil: now.Add(time.Hour)}
+	u.entries["active-within-window"] = &lockoutEntry{firstFailureAt: now}
+
+	removed := u.sweepExpired(now)
+
+	assert.Equal(t, 2, removed)
+	assert.NotContains(t, u.entries, "stale-never-locked")
+	assert.NotContains(t, u.entries, "stale-lockout-expired")
+	assert.Contains(t, u.entries, "active-locked")
+	assert.Contains(t, u.entries, "active-within-window")
+}
+
+// TestUnsealLockoutSweepBoundsGrowthFromManyDistinctHosts is the direct proof
+// that attempts from an unbounded number of distinct source hosts do not
+// grow entries without bound: a sweep after the window elapses reclaims all
+// of them.
+func TestUnsealLockoutSweepBoundsGrowthFromManyDistinctHosts(t *testing.T) {
+	window := 20 * time.Millisecond
+	u := newUnsealLockout(1000, window, time.Minute)
+
+	const numHosts = 500
+	for i := 0; i < numHosts; i++ {
+		u.RecordFailure(fmt.Sprintf("10.0.0.%d", i))
+	}
+	assert.Len(t, u.entries, numHosts)
+
+	time.Sleep(2 * window)
+
+	removed := u.sweepExpired(time.Now())
+	assert.Equal(t, numHosts, removed)
+	assert.Empty(t, u.entries)
+}
+
+func TestUnsealLockoutStartSweeperRemovesStaleEntriesOverTime(t *testing.T) {
+	window := 10 * time.Millisecond
+	u := newUnsealLockout(1000, window, time.Minute)
+	u.RecordFailure("1.2.3.4")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go u.startSweeper(ctx, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		return len(u.entries) == 0
+	}, time.Second, 5*time.Millisecond, "sweeper never removed the stale entry")
+}
+
+func TestUnsealLockoutStartSweeperStopsOnContextCancel(t *testing.T) {
+	u := newUnsealLockout(1000, time.Minute, time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		u.startSweeper(ctx, time.Millisecond)
+		close(done)
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("startSweeper did not return after context cancellation")
+	}
+}
+
+func TestServerStartEnablesLockoutSweeperAndShutdownStopsIt(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = getFreePort()
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = true
+	config.UnsealLockout.Threshold = 5
+	config.UnsealLockout.WindowSeconds = 900
+	config.UnsealLockout.LockoutSeconds = 900
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	go srv.Start()
+
+	require.Eventually(t, func() bool {
+		return srv.lockoutSweepCancel != nil
+	}, time.Second, 5*time.Millisecond, "lockout sweeper was never started")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.NoError(t, srv.Shutdown(ctx))
+}
+
+func TestServerStartWithoutLockoutLeavesSweeperDisabled(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = getFreePort()
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = false
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+	require.Nil(t, srv.unsealLockout)
+
+	go srv.Start()
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Nil(t, srv.lockoutSweepCancel)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.NoError(t, srv.Shutdown(ctx))
+}
+
+// unsealLockoutTestServer creates a sealed, initialized server with the given
+// unseal lockout settings, returning the server and the Shamir unseal keys.
+func unsealLockoutTestServer(t *testing.T, threshold, windowSeconds, lockoutSeconds int) (*Server, []string) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "securevault-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	config := &Config{}
+	config.Server.Address = "127.0.0.1"
+	config.Server.Port = 0
+	config.Storage.Type = "file"
+	config.Storage.Path = tmpDir
+	config.Auth.TokenTTL = "1h"
+	config.Seal.SecretShares = 1
+	config.Seal.SecretThreshold = 1
+	config.UnsealLockout.Enabled = true
+	config.UnsealLockout.Threshold = threshold
+	config.UnsealLockout.WindowSeconds = windowSeconds
+	config.UnsealLockout.LockoutSeconds = lockoutSeconds
+
+	srv, err := NewServer(config)
+	require.NoError(t, err)
+
+	initResp, err := srv.sealManager.Initialize(1, 1)
+	require.NoError(t, err)
+
+	require.NoError(t, srv.sealManager.Seal())
+
+	return srv, initResp.Keys
+}
+
+func TestUnsealHandlerLockout(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 1)
+
+	// Three wrong-key attempts, each evaluated and rejected.
+	for i := 0; i < 3; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// The 4th attempt, even with the correct key, must be rejected without evaluation.
+	rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.NotEmpty(t, rr.Header().Get("Retry-After"))
+	assert.True(t, srv.sealManager.IsSealed())
+
+	// Wait for the lockout to expire.
+	time.Sleep(1200 * time.Millisecond)
+
+	rr = doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.False(t, srv.sealManager.IsSealed())
+}
+
+// TestUnsealHandlerLockoutAcrossConnections proves the lockout is keyed by
+// host, not by the raw RemoteAddr, so an attacker who reconnects (getting a
+// new ephemeral source port) on every attempt still gets locked out.
+func TestUnsealHandlerLockoutAcrossConnections(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 1)
+
+	// Three wrong-key attempts, each from a distinct source port (simulating
+	// a fresh TCP connection per attempt), each evaluated and rejected.
+	ports := []string{"54321", "60000", "12345"}
+	for _, port := range ports {
+		rr := doRequestFromAddr(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		}, "203.0.113.7:"+port)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// A 4th attempt from yet another new port, even with the correct key,
+	// must still be rejected without evaluation: the host, not the
+	// connection, is locked out.
+	rr := doRequestFromAddr(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	}, "203.0.113.7:9999")
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+	assert.NotEmpty(t, rr.Header().Get("Retry-After"))
+	assert.True(t, srv.sealManager.IsSealed())
+}
+
+func TestUnsealHandlerSuccessResetsLockoutCounter(t *testing.T) {
+	srv, keys := unsealLockoutTestServer(t, 3, 900, 900)
+
+	// Two wrong-key attempts (under the threshold of 3).
+	for i := 0; i < 2; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
+
+	// Correct key succeeds and must reset the counter.
+	rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+		"key": keys[0],
+	})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.False(t, srv.sealManager.IsSealed())
+
+	// Re-seal and repeat two more failures: they must not carry over past the
+	// intervening success, so neither should trip the lockout.
+	require.NoError(t, srv.sealManager.Seal())
+
+	for i := 0; i < 2; i++ {
+		rr := doRequest(srv, "POST", "/v1/sys/unseal", "", map[string]string{
+			"key": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,6 +75,13 @@ type Config struct {
 		Burst          int     `yaml:"burst"`
 	} `yaml:"rate_limit"`
 
+	UnsealLockout struct {
+		Enabled        bool `yaml:"enabled"`
+		Threshold      int  `yaml:"threshold"`
+		WindowSeconds  int  `yaml:"window_seconds"`
+		LockoutSeconds int  `yaml:"lockout_seconds"`
+	} `yaml:"unseal_lockout"`
+
 	Audit struct {
 		Enabled bool   `yaml:"enabled"`
 		Path    string `yaml:"path"`
@@ -113,6 +121,8 @@ type Server struct {
 	replicationStarted bool
 	replicationReady   chan struct{}
 	rateLimiter        *RateLimiter
+	unsealLockout      *unsealLockout
+	lockoutSweepCancel context.CancelFunc
 	tokenStorePath     string
 
 	// Leader election and failover
@@ -172,6 +182,144 @@ func (rl *RateLimiter) Allow() bool {
 	return true
 }
 
+// lockoutEntry tracks consecutive unseal failures for a single source.
+type lockoutEntry struct {
+	failures       int
+	firstFailureAt time.Time
+	lockedUntil    time.Time
+}
+
+// isStale reports whether entry no longer needs to be tracked: its lockout
+// (if any) has expired, or the failure window has lapsed with no lockout
+// ever being triggered.
+func (entry *lockoutEntry) isStale(now time.Time, window time.Duration) bool {
+	if now.Before(entry.lockedUntil) {
+		return false
+	}
+	return !entry.lockedUntil.IsZero() || now.Sub(entry.firstFailureAt) > window
+}
+
+// unsealLockoutSweepInterval is how often a running Server sweeps its
+// unsealLockout for stale entries, so that attempts from an unbounded number
+// of distinct source hosts don't grow entries without bound.
+const unsealLockoutSweepInterval = time.Minute
+
+// unsealLockout enforces a hard lockout on a source after too many
+// consecutive failed unseal attempts within a sliding window.
+type unsealLockout struct {
+	mu         sync.Mutex
+	entries    map[string]*lockoutEntry
+	threshold  int
+	window     time.Duration
+	lockoutDur time.Duration
+}
+
+// newUnsealLockout creates a new unseal lockout tracker.
+func newUnsealLockout(threshold int, window, lockoutDur time.Duration) *unsealLockout {
+	return &unsealLockout{
+		entries:    make(map[string]*lockoutEntry),
+		threshold:  threshold,
+		window:     window,
+		lockoutDur: lockoutDur,
+	}
+}
+
+// Allow reports whether a new unseal attempt from key is permitted. If not,
+// it returns the remaining lockout duration.
+func (u *unsealLockout) Allow(key string) (bool, time.Duration) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	entry, ok := u.entries[key]
+	if !ok {
+		return true, 0
+	}
+
+	now := time.Now()
+	if now.Before(entry.lockedUntil) {
+		return false, entry.lockedUntil.Sub(now)
+	}
+
+	if entry.isStale(now, u.window) {
+		delete(u.entries, key)
+	}
+
+	return true, 0
+}
+
+// RecordFailure records a failed unseal attempt from key, triggering a
+// lockout once the threshold is reached within the window.
+func (u *unsealLockout) RecordFailure(key string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	now := time.Now()
+	entry, ok := u.entries[key]
+	if !ok || now.Sub(entry.firstFailureAt) > u.window {
+		entry = &lockoutEntry{firstFailureAt: now}
+		u.entries[key] = entry
+	}
+
+	entry.failures++
+	if entry.failures >= u.threshold {
+		entry.lockedUntil = now.Add(u.lockoutDur)
+	}
+}
+
+// RecordSuccess clears any tracked failures for key.
+func (u *unsealLockout) RecordSuccess(key string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	delete(u.entries, key)
+}
+
+// sweepExpired removes every stale entry (lockout expired, or failure window
+// lapsed with no lockout ever triggered), so that entries from sources that
+// are never revisited don't accumulate forever. It returns the number of
+// entries removed.
+func (u *unsealLockout) sweepExpired(now time.Time) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	removed := 0
+	for key, entry := range u.entries {
+		if entry.isStale(now, u.window) {
+			delete(u.entries, key)
+			removed++
+		}
+	}
+	return removed
+}
+
+// startSweeper periodically removes stale entries from u.entries until ctx
+// is canceled.
+func (u *unsealLockout) startSweeper(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			u.sweepExpired(time.Now())
+		}
+	}
+}
+
+// lockoutKey extracts the host portion of a request's RemoteAddr, dropping
+// the ephemeral source port so that an attacker reconnecting on a new TCP
+// connection for every attempt cannot evade the lockout by getting a fresh
+// key each time. Falls back to the raw address if it isn't host:port.
+func lockoutKey(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -193,6 +341,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Seal.SecretThreshold == 0 {
 		config.Seal.SecretThreshold = 3
+	}
+	if config.UnsealLockout.Threshold == 0 {
+		config.UnsealLockout.Threshold = 5
+	}
+	if config.UnsealLockout.WindowSeconds == 0 {
+		config.UnsealLockout.WindowSeconds = 900
+	}
+	if config.UnsealLockout.LockoutSeconds == 0 {
+		config.UnsealLockout.LockoutSeconds = 900
 	}
 
 	return &config, nil
@@ -267,6 +424,24 @@ func NewServer(config *Config) (*Server, error) {
 		limiter = NewRateLimiter(rate, burst)
 	}
 
+	// Initialize unseal lockout tracker
+	var lockout *unsealLockout
+	if config.UnsealLockout.Enabled {
+		threshold := config.UnsealLockout.Threshold
+		if threshold <= 0 {
+			threshold = 5
+		}
+		windowSec := config.UnsealLockout.WindowSeconds
+		if windowSec <= 0 {
+			windowSec = 900
+		}
+		lockoutSec := config.UnsealLockout.LockoutSeconds
+		if lockoutSec <= 0 {
+			lockoutSec = 900
+		}
+		lockout = newUnsealLockout(threshold, time.Duration(windowSec)*time.Second, time.Duration(lockoutSec)*time.Second)
+	}
+
 	server := &Server{
 		config:           config,
 		storage:          storageBackend,
@@ -277,6 +452,7 @@ func NewServer(config *Config) (*Server, error) {
 		replicationLog:   make([]ReplicationEntry, 0),
 		replicationReady: make(chan struct{}),
 		rateLimiter:      limiter,
+		unsealLockout:    lockout,
 		tokenStorePath:   filepath.Join(config.Storage.Path, "tokens.enc"),
 	}
 
@@ -479,6 +655,15 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start the unseal lockout sweeper, if lockout is enabled, so that
+	// entries from sources that are never revisited don't accumulate
+	// without bound.
+	if s.unsealLockout != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.lockoutSweepCancel = cancel
+		go s.unsealLockout.startSweeper(ctx, unsealLockoutSweepInterval)
+	}
+
 	// Start main HTTP server
 	if s.config.Server.TLS.Enabled {
 		cert, err := tls.LoadX509KeyPair(s.config.Server.TLS.CertFile, s.config.Server.TLS.KeyFile)
@@ -510,6 +695,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Stop failover monitor
 	if s.failoverCancel != nil {
 		s.failoverCancel()
+	}
+
+	// Stop unseal lockout sweeper
+	if s.lockoutSweepCancel != nil {
+		s.lockoutSweepCancel()
 	}
 
 	// Persist tokens before shutdown
@@ -683,6 +873,23 @@ func (s *Server) initHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
+	source := lockoutKey(r.RemoteAddr)
+
+	if s.unsealLockout != nil {
+		if allowed, retryAfter := s.unsealLockout.Allow(source); !allowed {
+			s.auditLogger.Log(audit.Event{
+				Timestamp:  time.Now(),
+				Type:       audit.EventUnseal,
+				RemoteAddr: source,
+				Success:    false,
+				Error:      "locked out due to too many failed unseal attempts",
+			})
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Round(time.Second).Seconds())))
+			http.Error(w, "Too many failed unseal attempts, try again later", http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	var req struct {
 		Key string `json:"key"`
 	}
@@ -694,6 +901,9 @@ func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
 
 	unsealed, err := s.sealManager.SubmitUnsealKey(req.Key)
 	if err != nil {
+		if s.unsealLockout != nil {
+			s.unsealLockout.RecordFailure(source)
+		}
 		s.auditLogger.Log(audit.Event{
 			Timestamp:  time.Now(),
 			Type:       audit.EventUnseal,
@@ -706,6 +916,10 @@ func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if unsealed {
+		if s.unsealLockout != nil {
+			s.unsealLockout.RecordSuccess(source)
+		}
+
 		// Load persisted tokens now that we're unsealed
 		s.loadTokens()
 
