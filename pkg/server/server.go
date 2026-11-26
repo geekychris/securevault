@@ -845,7 +845,7 @@ func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
 		s.auditLogger.Log(audit.Event{
 			Timestamp:  time.Now(),
 			Type:       audit.EventUnseal,
-			RemoteAddr: r.RemoteAddr,
+			RemoteAddr: source,
 			Success:    false,
 			Error:      err.Error(),
 		})
@@ -864,7 +864,7 @@ func (s *Server) unsealHandler(w http.ResponseWriter, r *http.Request) {
 		s.auditLogger.Log(audit.Event{
 			Timestamp:  time.Now(),
 			Type:       audit.EventUnseal,
-			RemoteAddr: r.RemoteAddr,
+			RemoteAddr: source,
 			Success:    true,
 		})
 	}
