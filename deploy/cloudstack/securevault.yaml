@@ -1,0 +1,159 @@
+# Single-node SecureVault (Vaultrix) for the lab, installed by cloud-stack
+# (cloudstack.app.yaml) or standalone with scripts/install-k8s.sh. Plain
+# Kubernetes YAML: `kubectl apply -f` works once the image is pullable.
+#
+# One replica with a ReadWriteOnce volume: the file backend is single-writer,
+# hence strategy Recreate. The vault starts SEALED after every restart and
+# must be unsealed (docs/DEPLOY.md); the probes treat sealed and
+# uninitialized as alive so the pod stays reachable for that.
+#
+# The leader/follower example cluster is in deploy/k8s/.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: securevault
+  labels:
+    app.kubernetes.io/name: securevault
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: securevault-server
+  namespace: securevault
+  labels:
+    app.kubernetes.io/name: securevault
+data:
+  config.yaml: |
+    server:
+      address: "0.0.0.0"
+      port: 8200
+      tls:
+        enabled: false          # TLS is terminated by the cloud-stack proxy
+    storage:
+      type: "file"
+      path: "/vault/data"
+    auth:
+      token_ttl: "8h"
+      token_max_ttl: "768h"
+    seal:
+      secret_shares: 5
+      secret_threshold: 3
+    rate_limit:
+      enabled: true
+      requests_per_sec: 100
+      burst: 200
+    unseal_lockout:
+      # Behind the proxy and kube-proxy every caller shares a few source
+      # addresses, so a lockout blocks unsealing for everyone: keep it short.
+      enabled: true
+      threshold: 10
+      window_seconds: 900
+      lockout_seconds: 300
+    audit:
+      enabled: true
+      path: "/vault/data/audit/audit.log"
+    replication:
+      mode: "standalone"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: securevault-data
+  namespace: securevault
+  labels:
+    app.kubernetes.io/name: securevault
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: securevault
+  namespace: securevault
+  labels:
+    app.kubernetes.io/name: securevault
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: securevault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: securevault
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: securevault
+          image: securevault:latest
+          args: ["-config", "/vault/config/config.yaml"]
+          ports:
+            - name: api
+              containerPort: 8200
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /vault/config
+              readOnly: true
+            - name: data
+              mountPath: /vault/data
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&uninitcode=204&sealedcode=204
+              port: api
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&uninitcode=204&sealedcode=204
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: securevault-server
+        - name: data
+          persistentVolumeClaim:
+            claimName: securevault-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: securevault
+  namespace: securevault
+  labels:
+    app.kubernetes.io/name: securevault
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: securevault
+  ports:
+    - name: api
+      port: 8200
+      targetPort: api
+      nodePort: 30950

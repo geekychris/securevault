@@ -1,5 +1,12 @@
 ##
 ## Vaultrix Production Configuration
+##
+## NOTE: this file sketches a fuller configuration than the server implements.
+## The server reads server.{address,port,tls.enabled,tls.cert_file,tls.key_file},
+## storage, auth.{token_ttl,token_max_ttl}, seal, rate_limit, unseal_lockout,
+## audit.{enabled,path} and replication.{mode,cluster_addr,peers,shared_secret,
+## leader_api_addr,health_check_sec,failover_timeout_sec}; every other key is
+## ignored. See docs/DEPLOY.md.
 ## 
 ## This configuration file provides secure, production-ready settings for 
 ## the Vaultrix service with detailed security and performance tuning.

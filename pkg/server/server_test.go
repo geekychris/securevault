@@ -1153,7 +1153,7 @@ func TestServerStartEnablesLockoutSweeperAndShutdownStopsIt(t *testing.T) {
 	go srv.Start()
 
 	require.Eventually(t, func() bool {
-		return srv.lockoutSweepCancel != nil
+		return srv.lockoutSweeperStarted()
 	}, time.Second, 5*time.Millisecond, "lockout sweeper was never started")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1183,7 +1183,7 @@ func TestServerStartWithoutLockoutLeavesSweeperDisabled(t *testing.T) {
 	go srv.Start()
 
 	time.Sleep(50 * time.Millisecond)
-	assert.Nil(t, srv.lockoutSweepCancel)
+	assert.False(t, srv.lockoutSweeperStarted())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

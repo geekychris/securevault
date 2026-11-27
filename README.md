@@ -160,14 +160,17 @@ resp, err := client.RotateShares(ctx, 5, 3)
 | `POST` | `/v1/sys/seal` | Seal vault |
 | `POST` | `/v1/sys/rotate-shares` | Re-share the master key under a new threshold/share set |
 | `GET` | `/v1/sys/seal-status` | Seal status |
-| `GET` | `/v1/health` | Health check |
+| `GET` | `/v1/health` | Health check (200 unsealed, 503 sealed) |
+| `GET` | `/v1/sys/health` | Vault-compatible health: 200 active, 429 standby, 501 uninitialized, 503 sealed; `standbyok`, `activecode`, `standbycode`, `sealedcode`, `uninitcode` override |
 | `POST` | `/v1/secret/{path}` | Write secret |
 | `GET` | `/v1/secret/{path}` | Read latest version |
 | `GET` | `/v1/secret/versions/{v}/{path}` | Read specific version |
-| `DELETE` | `/v1/secret/{path}?destroy=true` | Delete secret |
+| `DELETE` | `/v1/secret/{path}` | Soft-delete the current version (`?versions=1,2` for others); recoverable |
+| `POST` | `/v1/secret/undelete/{path}` | Restore soft-deleted versions (`{"versions": [1]}`, default current) |
+| `DELETE` | `/v1/secret/{path}?destroy=true` | Destroy versions permanently (all, or `&versions=...`) |
 | `GET` | `/v1/secret/list/{path}` | List secrets |
 | `GET` | `/v1/secret/metadata/{path}` | Secret metadata |
-| `POST` | `/v1/auth/token/create` | Create token |
+| `POST` | `/v1/auth/token/create` | Create a child token (subset of the caller's policies; default: all of them) |
 | `GET` | `/v1/auth/token/lookup-self` | Lookup current token |
 | `POST` | `/v1/auth/token/renew-self` | Renew token |
 | `POST` | `/v1/auth/token/revoke-self` | Revoke token |
@@ -177,6 +180,13 @@ resp, err := client.RotateShares(ctx, 5, 3)
 | `DELETE` | `/v1/policies/{name}` | Delete policy |
 | `GET` | `/v1/policies` | List policies |
 | `GET` | `/v1/audit/events` | Query audit log |
+
+Semantics worth knowing, all as in Vault:
+
+- **Tokens.** The root token from `init` never expires; revoke it once you have policy-scoped admin tokens. Other tokens get `auth.token_ttl` (default 1h) and can't be created or renewed past `auth.token_max_ttl` (default 768h) after creation. A child token can only carry policies its parent has (root excepted) and never outlives its parent.
+- **Accessors.** Secret metadata (`created_by`, `deleted_by`) and the audit log record a token's accessor (`accessor:<hex>`, also returned by `token/create` and `lookup-self`), never the token.
+- **Deletes.** A plain `DELETE` is a soft delete: reads return 404 until `undelete`. Only `destroy=true` removes data.
+- **Paths.** Secret paths must be relative with no empty, `.` or `..` segments; the first segments `metadata`, `versions`, `list` and `undelete` are reserved by the API. Policy names are `[A-Za-z0-9][A-Za-z0-9_.-]*`; the `root` policy can't be changed or deleted.
 
 ## Client Libraries
 
@@ -336,6 +346,10 @@ docker compose -f docker-compose.cluster.yml up --build
 
 ## Kubernetes
 
+**In the lab (cloud-stack):** a single-node install with a persistent volume, see [docs/DEPLOY.md](docs/DEPLOY.md). From a cloud-stack checkout: `deploy/app/install.sh geekychris/securevault spark`; standalone against your current `kubectl` cluster: `scripts/install-k8s.sh`.
+
+The example leader/follower cluster:
+
 ```bash
 kubectl apply -f deploy/k8s/namespace.yaml
 kubectl apply -f deploy/k8s/configmap.yaml
@@ -373,6 +387,14 @@ sequenceDiagram
     Client->>Follower2: GET /v1/secret/app/key
     Follower2-->>Client: {"data": {...}}
 ```
+
+### What replicates, and the limits
+
+- **Only secret data replicates**: writes, deletes, destroys and undeletes, delivered to each follower in order and exactly once while the follower is reachable (the leader retries a follower from where it stopped).
+- **Tokens and policies are per node.** Each node is initialized and unsealed with its own keys and root token, so a token issued by the leader is not valid for reads on a follower.
+- **The replication log is in memory** (last 10,000 operations). A follower that is down for longer, or a leader restart, needs a manual resync (copy the data directory).
+- **Clustered nodes need `replication.shared_secret`**; the server refuses to start in `leader` or `follower` mode without it. Replication traffic is plain HTTP unless TLS is enabled.
+- **Failover has no consensus.** Every follower whose leader is unreachable for `failover_timeout_sec` promotes itself, and a returning leader keeps its role, so a partition can produce two leaders. Use it for read replicas and manual failover; for automatic HA, Vault's Raft storage is the reference design.
 
 ### Failover
 

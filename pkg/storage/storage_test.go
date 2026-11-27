@@ -116,13 +116,20 @@ func TestDeleteSpecificVersions(t *testing.T) {
 	err := backend.DeleteSecret("test/multi", DeleteOptions{Versions: []int{1}, UserID: "test"})
 	require.NoError(t, err)
 
-	// v1 should be destroyed
+	// v1 should be soft-deleted (unreadable, but not destroyed)
 	_, err = backend.ReadSecret("test/multi", ReadOptions{Version: 1})
 	assert.Error(t, err)
-	assert.True(t, vaulterrors.IsVersionDestroyed(err))
+	assert.True(t, vaulterrors.IsVersionDeleted(err))
+	assert.False(t, vaulterrors.IsVersionDestroyed(err))
+
+	// ...and can be restored
+	require.NoError(t, backend.UndeleteSecret("test/multi", []int{1}))
+	secret, err := backend.ReadSecret("test/multi", ReadOptions{Version: 1})
+	require.NoError(t, err)
+	assert.Equal(t, float64(0), secret.Data["v"])
 
 	// v2 and v3 should still be accessible
-	secret, err := backend.ReadSecret("test/multi", ReadOptions{Version: 2})
+	secret, err = backend.ReadSecret("test/multi", ReadOptions{Version: 2})
 	require.NoError(t, err)
 	assert.Equal(t, float64(1), secret.Data["v"])
 

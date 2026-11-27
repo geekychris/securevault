@@ -31,6 +31,14 @@ var (
 	// ErrVersionDestroyed indicates the requested version has been destroyed
 	ErrVersionDestroyed = errors.New("version destroyed")
 
+	// ErrVersionDeleted indicates the requested version has been soft-deleted
+	// (it can still be undeleted, unlike a destroyed version)
+	ErrVersionDeleted = errors.New("version deleted")
+
+	// ErrInvalidPath indicates a secret path or policy name that is empty,
+	// absolute, or contains "." / ".." segments or other unsafe characters
+	ErrInvalidPath = errors.New("invalid path")
+
 	// ErrInvalidRequest indicates the request is malformed
 	ErrInvalidRequest = errors.New("invalid request")
 
@@ -103,6 +111,30 @@ func (e *VersionDestroyedError) Error() string {
 
 func (e *VersionDestroyedError) Unwrap() error {
 	return ErrVersionDestroyed
+}
+
+// VersionDeletedError wraps ErrVersionDeleted with path and version
+type VersionDeletedError struct {
+	Path    string
+	Version int
+}
+
+func (e *VersionDeletedError) Error() string {
+	return fmt.Sprintf("version %d of secret %s has been deleted", e.Version, e.Path)
+}
+
+func (e *VersionDeletedError) Unwrap() error {
+	return ErrVersionDeleted
+}
+
+// IsVersionDeleted checks if an error is a version-deleted (soft delete) error
+func IsVersionDeleted(err error) bool {
+	return errors.Is(err, ErrVersionDeleted)
+}
+
+// IsInvalidPath checks if an error is an invalid-path error
+func IsInvalidPath(err error) bool {
+	return errors.Is(err, ErrInvalidPath)
 }
 
 // IsNotFound checks if an error is a not-found error

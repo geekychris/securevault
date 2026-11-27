@@ -1,0 +1,23 @@
+apiVersion: cloudstack/v1
+kind: App
+name: securevault
+title: SecureVault
+description: Vaultrix secrets server, a HashiCorp-Vault-style KV v2 store with Shamir seal, policies, tokens and audit (REST /v1, UI /ui/)
+repo: geekychris/securevault
+group: apps
+icon: storage
+
+namespace: securevault
+build: {image: securevault, dockerfile: Dockerfile, context: .}
+manifests: deploy/cloudstack
+workload: {kind: Deployment, name: securevault, container: securevault}
+service: {name: securevault, port: 8200, nodePort: 30950}
+# 200 when initialized and unsealed. A fresh vault answers 204 and a sealed
+# one 423, so installs and upgrades (which restart it sealed) pass the
+# installer's check, and the Infra tab shows 423 until someone unseals it.
+health: /v1/sys/health?uninitcode=204&sealedcode=423
+ui: /ui/
+
+# cloud-stack only (the standalone installer ignores these)
+console: {title: SecureVault}
+route: {name: securevault, exposure: internal}   # securevault.hitorro.com on the LAN only; never public
