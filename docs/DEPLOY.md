@@ -48,14 +48,24 @@ A new install is **uninitialized**. Initialize it once, from a machine you
 trust, and store what comes back:
 
 ```sh
-curl -s -X POST http://spark.local:30950/v1/sys/init -d '{}'      # 5 shares, threshold 3 (config)
+scripts/init-vault.sh -a http://spark.hitorro.com:30950      # 5 shares, threshold 3 (config)
 ```
 
-The response holds the five unseal key shares and the root token. They are
-shown **once** and can't be recovered (the server keeps only a hash of the
+It writes the five unseal key shares and the root token to
+`~/securevault-init.json` (mode 600) and never prints them, so they don't end
+up in terminal scrollback, logs or chat. It refuses to run if that file
+already holds a result or the vault is already initialized, so a second run
+can't overwrite the only copy. Don't initialize with a bare `curl` to the
+terminal. The shares and token are given out **once** and can't be recovered (the server keeps only a hash of the
 master key). Give the shares to different holders or store them separately;
 keep the root token for break-glass use, create policy-scoped tokens for
-day-to-day work, then `POST /v1/auth/token/revoke-self` with the root token.
+day-to-day work, then `POST /v1/auth/token/revoke-self` with the root token. Delete the file
+once the shares are with their holders.
+
+If the output was lost before anything was stored, the only way back is to
+delete the data volume and initialize again: `kubectl -n securevault scale
+deploy/securevault --replicas=0`, `kubectl -n securevault delete pvc
+securevault-data`, then re-run the install.
 
 ## Every restart: unseal
 
@@ -63,8 +73,8 @@ The vault starts **sealed** after every pod restart, upgrade or node reboot.
 Until three shares are submitted it serves nothing but status:
 
 ```sh
-curl -s -X POST http://spark.local:30950/v1/sys/unseal -d '{"key":"<share>"}'   # three times, three different shares
-curl -s http://spark.local:30950/v1/sys/seal-status
+curl -s -X POST http://spark.hitorro.com:30950/v1/sys/unseal -d '{"key":"<share>"}'   # three times, three different shares
+curl -s http://spark.hitorro.com:30950/v1/sys/seal-status
 ```
 
 There is no auto-unseal: that's deliberate for a lab without an HSM or KMS.
